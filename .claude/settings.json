@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.claude/shared/dispatch.sh *)",
+      "Bash(./.claude/shared/dispatch.sh *)",
+      "Bash(./orchestrator.sh)",
+      "Bash(tmux ls *)",
+      "Bash(tmux list-panes *)",
+      "Bash(tmux list-windows *)",
+      "Bash(tmux capture-pane *)",
+      "Bash(pytest *)",
+      "Bash(python -m pytest *)",
+      "Bash(python3 -m pytest *)",
+      "Bash(python -m py_compile *)",
+      "Bash(pip install *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git add *)",
+      "mcp__claude_ai_Pragma-HA-MCP__ha_get_state",
+      "mcp__claude_ai_Pragma-HA-MCP__ha_get_entity",
+      "mcp__claude_ai_Pragma-HA-MCP__ha_get_logs",
+      "mcp__claude_ai_Pragma-HA-MCP__ha_get_integration",
+      "mcp__claude_ai_Pragma-HA-MCP__ha_search"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hassfest:
+    name: hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
+          # This integration is not (yet) listed in home-assistant/brands — that's
+          # a separate, later submission to the core brands repo, not something
+          # this repo controls. Without `ignore: brands` the HACS action fails on
+          # every run until that submission lands and merges upstream.
+          ignore: brands

@@ -1,0 +1,12 @@
+pytest-homeassistant-custom-component==0.13.286
+homeassistant==2025.10.1
+freezegun
+pymodbus>=3.8.6,<4
+# homeassistant==2025.10.1 pins aiodns==3.5.0, which declares pycares>=4.9.0 with no
+# upper bound. pycares 5.0.1 renamed/removed the ares_query_a_result attribute that
+# aiodns 3.5.0's DNSResolver imports at module load time, so an unpinned resolve on
+# a clean install breaks before pytest can even collect a single test:
+#   AttributeError: module 'pycares' has no attribute 'ares_query_a_result'
+# Pin below 5 until aiodns/homeassistant bump their own pin. Test-env-only — does
+# not affect the shipped integration (HA's own container manages aiodns/pycares).
+pycares<5

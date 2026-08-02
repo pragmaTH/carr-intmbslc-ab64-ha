@@ -1,0 +1,70 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Virtualenvs ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- Test / coverage / lint caches ---
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# --- Home Assistant test instance artifacts ---
+# (ถ้ามีการรัน HA dev instance ในโฟลเดอร์นี้ อย่าให้ config/log/db หลุดขึ้น public repo)
+config/
+.storage/
+home-assistant.log*
+home-assistant_v2.db*
+*.db-shm
+*.db-wal
+
+# --- Secrets / ค่าเฉพาะไซต์ (public repo — ห้ามหลุดเด็ดขาด) ---
+secrets.yaml
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+token.json
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- agent config ของโปรเจกต์อื่นที่ติดมาตอน copy โครง .claude/ ---
+# references/.claude/** เป็นชุด agent ของทีม TVO OT Server Room (nodered-engineer ฯลฯ)
+# ไม่เกี่ยวกับ integration นี้ และอธิบายระบบ OT ของไซต์ลูกค้าจริง — เก็บไว้ในเครื่องได้ แต่ไม่ push
+# (ตัดสินใจ 2026-08-02 ตอนตรวจ git add -A --dry-run ก่อน push ครั้งแรก)
+references/.claude/
+
+# --- Claude Code: ค่าเฉพาะเครื่อง + artifact การทำงานของทีม agent ---
+# ตัว agent/command definition ยัง track ไว้ (เป็น context ของ repo)
+# แต่ plan/task/done/review เป็นบันทึกระหว่างทาง ไม่ใช่ deliverable ของ public repo
+.claude/settings.local.json
+.claude/shared/plan-*.md
+.claude/shared/tasks/*
+.claude/shared/done/*
+.claude/shared/review/*
+!.claude/shared/tasks/.gitkeep
+!.claude/shared/done/.gitkeep
+!.claude/shared/review/.gitkeep

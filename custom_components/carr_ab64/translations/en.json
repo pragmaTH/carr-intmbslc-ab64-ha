@@ -1,0 +1,83 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to AB64 gateway",
+        "description": "Enter a name for this AC unit and the Modbus TCP gateway it's reachable through. Port is not defaulted — check your gateway's configuration (e.g. an Elfin EW11 may default to 8899, not 502).",
+        "data": {
+          "name": "Device name",
+          "host": "Host / IP address",
+          "port": "Port"
+        }
+      },
+      "unit": {
+        "title": "Find the unit-id",
+        "description": "Leave unit-id blank to scan unit-ids 1-63 (address 0 is skipped — it's the Modbus broadcast address and never responds) and read register 0 on each; this can take up to about a minute. Or enter a specific unit-id to verify it directly, including 0 — if your AB64 is set to address 0, change the DIP switch, since it will never respond on that address. Do not trust the DIP switch reading alone.",
+        "data": {
+          "unit_id": "Unit-id (optional — leave blank to scan)"
+        }
+      },
+      "select_unit": {
+        "title": "Multiple units found",
+        "description": "More than one unit-id responded on this gateway. Choose the one for this AC unit.",
+        "data": {
+          "unit_id": "Unit-id"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure AB64 connection",
+        "description": "Change the host, port, or unit-id for this AC unit. The new values are re-verified by reading register 0 before saving.",
+        "data": {
+          "host": "Host / IP address",
+          "port": "Port",
+          "unit_id": "Unit-id"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not open a TCP connection to the gateway. Check host, port, and that the gateway is reachable on the network.",
+      "read_timeout": "Connected to the gateway, but the AB64 did not respond on this unit-id. Check wiring, baud rate, and DIP switch address.",
+      "no_units_found": "No unit-id in the 1-63 range responded. Check wiring, baud rate, and that the gateway is bridged to the RS-485 bus.",
+      "all_units_already_configured": "Every unit-id that responded on this gateway is already set up as another entry. Nothing new to add here.",
+      "already_configured": "This host, port, and unit-id combination is already configured."
+    },
+    "abort": {
+      "already_configured": "This host, port, and unit-id combination is already configured.",
+      "reconfigure_successful": "AB64 connection updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "AB64 options",
+        "data": {
+          "scan_interval": "Poll interval (seconds)",
+          "enable_advanced_telemetry": "Enable advanced telemetry sensors"
+        }
+      }
+    },
+    "error": {
+      "scan_interval_too_low": "Poll interval must be at least 10 seconds — this bus may be shared with other AB64 units on the same gateway."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "error_code": { "name": "Error code" },
+      "indoor_temp": { "name": "Indoor temperature (TA)" },
+      "indoor_coil_temp_tcj": { "name": "Indoor coil temperature (TCJ)" },
+      "indoor_coil_temp_tc2": { "name": "Indoor coil temperature (TC2)" },
+      "indoor_fan_rpm": { "name": "Indoor fan speed" },
+      "filter_sign_timer": { "name": "Filter sign timer" },
+      "outdoor_evaporator_temp_te": { "name": "Outdoor evaporator temperature (TE)" },
+      "outdoor_temp_to": { "name": "Outdoor temperature (TO)" },
+      "outdoor_discharge_temp_td": { "name": "Outdoor discharge temperature (TD)" },
+      "outdoor_suction_temp_ts": { "name": "Outdoor suction temperature (TS)" },
+      "compressor_current": { "name": "Compressor current" },
+      "compressor_rpm": { "name": "Compressor speed" },
+      "lowest_fan_rpm": { "name": "Lowest outdoor fan speed" }
+    },
+    "binary_sensor": {
+      "ab_bus_link": { "name": "AB Bus link" }
+    }
+  }
+}

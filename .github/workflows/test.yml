@@ -1,0 +1,22 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 3.13 matches this project's minimum supported Home Assistant release
+      # (2025.10.1, which requires Python >=3.13.2) — see requirements_test.txt,
+      # which pins homeassistant==2025.10.1 for the same reason.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test dependencies
+        run: pip install -r requirements_test.txt
+      - name: Run pytest
+        run: pytest
