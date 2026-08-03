@@ -16,6 +16,7 @@ from pymodbus.exceptions import ConnectionException
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 
 from .const import (
     CONF_ENABLE_ADVANCED,
@@ -38,17 +39,43 @@ _LOGGER = logging.getLogger(__name__)
 # in const.py) it's ~63s worst case.
 SCAN_PROBE_TIMEOUT = 1.0
 
+# A plain `vol.All(vol.Coerce(int), vol.Range(min=1, ...))` gets rendered by the HA
+# frontend as a number field that shows the range's `min` as a pre-filled value —
+# there's no field left blank, so a user who doesn't know their gateway's port (see
+# the "not defaulted" wording in strings.json) can submit the form untouched and get
+# port 1, which is never correct. A `selector.NumberSelector` renders as a genuinely
+# empty box instead; it validates min/max itself but returns a float, so it's still
+# chained with vol.Coerce(int) to keep CONF_PORT an int everywhere else (unique_id
+# string, AsyncModbusTcpClient(port=...), etc.).
+PORT_SELECTOR = vol.All(
+    selector.NumberSelector(
+        selector.NumberSelectorConfig(min=1, max=65535, mode=selector.NumberSelectorMode.BOX)
+    ),
+    vol.Coerce(int),
+)
+
+# Same reasoning/shape as PORT_SELECTOR (a plain vol.Range-based validator renders as
+# a number field/slider that can't be left empty on the frontend). This one matters
+# even more: unit_id is genuinely optional (blank = scan the whole range), and 0 is
+# the Modbus broadcast address that never answers, so a widget that can't render
+# "empty" would silently steer every user away from the scan path. mode=BOX (not
+# SLIDER) is required for a slider-type widget to have no natural "unset" position.
+UNIT_ID_SELECTOR = vol.All(
+    selector.NumberSelector(
+        selector.NumberSelectorConfig(min=0, max=63, mode=selector.NumberSelectorMode.BOX)
+    ),
+    vol.Coerce(int),
+)
+
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): str,
         vol.Required(CONF_HOST): str,
-        vol.Required(CONF_PORT): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+        vol.Required(CONF_PORT): PORT_SELECTOR,
     }
 )
 
-STEP_UNIT_SCHEMA = vol.Schema(
-    {vol.Optional(CONF_UNIT_ID): vol.All(vol.Coerce(int), vol.Range(min=0, max=63))}
-)
+STEP_UNIT_SCHEMA = vol.Schema({vol.Optional(CONF_UNIT_ID): UNIT_ID_SELECTOR})
 
 
 class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -191,12 +218,10 @@ class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
         data_schema = vol.Schema(
             {
                 vol.Required(CONF_HOST, default=entry.data[CONF_HOST]): str,
-                vol.Required(CONF_PORT, default=entry.data[CONF_PORT]): vol.All(
-                    vol.Coerce(int), vol.Range(min=1, max=65535)
-                ),
+                vol.Required(CONF_PORT, default=entry.data[CONF_PORT]): PORT_SELECTOR,
                 vol.Required(
                     CONF_UNIT_ID, default=entry.data[CONF_UNIT_ID]
-                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=63)),
+                ): UNIT_ID_SELECTOR,
             }
         )
         return self.async_show_form(

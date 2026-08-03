@@ -20,6 +20,11 @@ class AB64Entity(CoordinatorEntity[AB64Coordinator]):
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
             manufacturer="Carrier-Toshiba",
-            model="CARR-INTMBSLC-AB64 (Intesis INMBSTOS001R000)",
+            # `model` names the relationship (this is an AC, controlled via an AB64),
+            # not a specific AC model/revision — we can't read that off the wire.
+            # `model_id` keeps the exact interface box identifier available for
+            # debugging/support without implying it's the AC's own model number.
+            model="Air conditioner (via AB64 Modbus interface)",
+            model_id="CARR-INTMBSLC-AB64 (Intesis INMBSTOS001R000)",
             sw_version=coordinator.sw_version,
         )
