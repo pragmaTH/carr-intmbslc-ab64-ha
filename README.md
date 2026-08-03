@@ -20,13 +20,19 @@ For the full hardware bring-up story, register map, and error code table behind 
 
 ## Installation (HACS custom repository)
 
-This integration is **not** in the default HACS store yet — install it as a custom repository:
+This integration is **not** in the default HACS store yet — install it as a custom repository.
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=pragmaTH&repository=carr-intmbslc-ab64-ha&category=integration)
+
+The button above only works if you've already set up [My Home Assistant](https://www.home-assistant.io/integrations/my/) in this browser and already have HACS installed — if it doesn't do anything for you, or you'd rather see each step, follow the manual steps below (same result):
 
 1. HACS → **⋮** (top right) → **Custom repositories**.
 2. Repository: `https://github.com/PragmaTH/carr-intmbslc-ab64-ha`, Category: **Integration**.
 3. Find "Carrier-Toshiba AB64 (Modbus)" in HACS and **Download**.
 4. **Restart Home Assistant.**
-5. Settings → Devices & Services → **Add Integration** → search "Carrier-Toshiba AB64".
+5. Settings → Devices & Services → **Add Integration** → search "Carrier-Toshiba AB64" — or use this button (same "already set up My Home Assistant" caveat as above):
+
+   [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=carr_ab64)
 
 ## Configuration
 
