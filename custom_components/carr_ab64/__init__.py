@@ -29,25 +29,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except ConnectionException as err:
         raise ConfigEntryNotReady(f"Cannot connect to {host}:{port}: {err}") from err
 
-    coordinator = AB64Coordinator(hass, entry, hub)
-
     try:
-        sw_regs = await hub.async_read_holding(unit_id, REG_SW_VERSION, 1)
-    except (AB64ReadError, ConnectionException):
-        coordinator.sw_version = None
-    else:
-        coordinator.sw_version = str(sw_regs[0])
+        coordinator = AB64Coordinator(hass, entry, hub)
 
-    try:
+        try:
+            sw_regs = await hub.async_read_holding(unit_id, REG_SW_VERSION, 1)
+        except (AB64ReadError, ConnectionException):
+            coordinator.sw_version = None
+        else:
+            coordinator.sw_version = str(sw_regs[0])
+
         await coordinator.async_config_entry_first_refresh()
         entry.runtime_data = coordinator
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except Exception:
-        # Covers both first-refresh and forward_entry_setups failures: either one
-        # leaves this entry never fully set up, so the hub refcount bumped by
-        # async_acquire_hub() above must be rolled back here — otherwise a failed
-        # setup leaks a reference and the shared client never closes even after the
-        # last entry on this host:port is removed.
+        # Covers coordinator construction, sw_version-read, first-refresh, and
+        # forward_entry_setups failures alike: any of them leaves this entry never
+        # fully set up, so the hub refcount bumped by async_acquire_hub() above must
+        # be rolled back here — otherwise a failed setup leaks a reference and the
+        # shared client never closes even after the last entry on this host:port is
+        # removed. Coordinator construction itself can raise (TypeError if a
+        # non-numeric scan_interval in entry.options reaches timedelta(seconds=...)),
+        # so it belongs inside this try too, not before it. The inner try/except above
+        # is deliberately narrower and still runs first: a sw_version read failure
+        # alone must degrade to sw_version = None, not abort setup.
         await async_release_hub(hass, host, port)
         raise
 

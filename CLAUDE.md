@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-This repo now contains a real Home Assistant custom integration at `custom_components/carr_ab64/` (HACS custom-repository distribution, public under `PragmaTH/carr-intmbslc-ab64-ha`), plus everything learned during a live bring-up session (2026-07-31, **historical** — see below) connecting to a real Carrier-Toshiba AB64 Modbus interface (Intesis INMBSTOS001R000) that the integration was built from.
+This repo now contains a real Home Assistant custom integration at `custom_components/carr_ab64/` (HACS custom-repository distribution, public under `pragmaTH/carr-intmbslc-ab64-ha`), plus everything learned during a live bring-up session (2026-07-31, **historical** — see below) connecting to a real Carrier-Toshiba AB64 Modbus interface (Intesis INMBSTOS001R000) that the integration was built from.
 
 ### Repo layout
 
@@ -112,7 +112,7 @@ These are documented in full (with the reasoning/evidence behind each) in `refer
 - **Register 11 == 65535 is a distinct fault class.** It means the AB64 itself has lost its AB Bus link to the AC (hardware-level), separate from both normal AC error codes and a Modbus timeout. Surface it as "gateway can't reach the unit," not as a generic AC error.
 - **Separate "TCP connect failed" from "TCP connected but Modbus timed out."** These point to different layers (network/gateway config vs. addressing/wiring) — collapsing both into a generic "unavailable" state defeats debugging.
 - **Serialize all register access through one coordinator/connection.** This is RS-485 behind a single TCP↔RTU gateway; concurrent requests from multiple entities will collide or serialize unpredictably. Don't create one Modbus client per entity.
-- **Don't default the config flow's port to 502.** Verify per gateway — the EW11 used in this bring-up actually defaulted to 8899. IP, port, and unit-id should be three separate required fields.
+- **Port defaults vary per gateway — the EW11 used in this bring-up actually defaulted to 8899, not 502.** That fact is still true and is why the config flow's port field warns about it directly. **However, as of 2026-08-04 the user decided the config flow *should* default the port field to `502`** (the Modbus TCP standard, and the same default `homeassistant/components/modbus` itself uses) — this reverses the original guidance here, which said not to default it to 502 at all. Reasoning: leaving the field with no default rendered as `0` on the frontend, which is wrong 100% of the time, strictly worse than a default that's sometimes wrong. The EW11/8899 risk is mitigated by keeping the 8899 warning in the port field's `data_description` (guarded by a test that fails if it's ever removed) rather than by refusing to default the field. IP, port, and unit-id remain three separate required fields — that part of the original guidance still holds.
 - **The gateway's TX/RX byte counters (Status page) are the fastest diagnostic tool** for bisecting where a request dies: network-side received bytes, serial-side sent bytes, serial-side received bytes — check in that order.
 - **AB64 has two independent status LEDs**: blue = Modbus frame received with correct address; green = AB Bus link to the AC unit. They indicate different link segments — don't conflate them when troubleshooting.
 

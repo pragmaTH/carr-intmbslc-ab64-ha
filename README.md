@@ -1,7 +1,7 @@
 # Carrier-Toshiba AB64 (Modbus) for Home Assistant
 
-[![Validate](https://github.com/PragmaTH/carr-intmbslc-ab64-ha/actions/workflows/validate.yml/badge.svg)](https://github.com/PragmaTH/carr-intmbslc-ab64-ha/actions/workflows/validate.yml)
-[![Test](https://github.com/PragmaTH/carr-intmbslc-ab64-ha/actions/workflows/test.yml/badge.svg)](https://github.com/PragmaTH/carr-intmbslc-ab64-ha/actions/workflows/test.yml)
+[![Validate](https://github.com/pragmaTH/carr-intmbslc-ab64-ha/actions/workflows/validate.yml/badge.svg)](https://github.com/pragmaTH/carr-intmbslc-ab64-ha/actions/workflows/validate.yml)
+[![Test](https://github.com/pragmaTH/carr-intmbslc-ab64-ha/actions/workflows/test.yml/badge.svg)](https://github.com/pragmaTH/carr-intmbslc-ab64-ha/actions/workflows/test.yml)
 
 Home Assistant custom integration for Carrier-Toshiba air conditioners fitted with an **AB64** interface box (Intesis INMBSTOS001R000). The AB64 translates the AC's proprietary AB Bus protocol to Modbus RTU; a separate Modbus TCP↔RTU gateway (e.g. an Elfin EW11) puts that on your network for Home Assistant to talk to.
 
@@ -27,18 +27,29 @@ This integration is **not** in the default HACS store yet — install it as a cu
 The button above only works if you've already set up [My Home Assistant](https://www.home-assistant.io/integrations/my/) in this browser and already have HACS installed — if it doesn't do anything for you, or you'd rather see each step, follow the manual steps below (same result):
 
 1. HACS → **⋮** (top right) → **Custom repositories**.
-2. Repository: `https://github.com/PragmaTH/carr-intmbslc-ab64-ha`, Category: **Integration**.
+2. Repository: `https://github.com/pragmaTH/carr-intmbslc-ab64-ha`, Category: **Integration**.
 3. Find "Carrier-Toshiba AB64 (Modbus)" in HACS and **Download**.
 4. **Restart Home Assistant.**
 5. Settings → Devices & Services → **Add Integration** → search "Carrier-Toshiba AB64" — or use this button (same "already set up My Home Assistant" caveat as above):
 
    [![Open your Home Assistant instance and start setting up a new integration.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=carr_ab64)
 
+## Manual installation (without HACS)
+
+Don't have HACS (e.g. a minimal Home Assistant Container/Core setup)? You can install this integration by hand instead:
+
+1. Get the code — there's no tagged release yet, so grab it straight from the `main` branch: either `git clone https://github.com/pragmaTH/carr-intmbslc-ab64-ha` or use GitHub's **Code → Download ZIP** on the repo page and extract it.
+2. Copy the **`custom_components/carr_ab64/` folder itself** (not the whole repo checkout) into your Home Assistant config directory, so you end up with `<config>/custom_components/carr_ab64/manifest.json` — **not** `<config>/custom_components/carr-intmbslc-ab64-ha/custom_components/carr_ab64/manifest.json` or similar. Copying the whole downloaded folder in one level too high is the single most common mistake here — if the integration doesn't show up after a restart, this is the first thing to check. Create `<config>/custom_components/` first if it doesn't exist yet.
+3. **Restart Home Assistant.**
+4. Settings → Devices & Services → **Add Integration** → search "Carrier-Toshiba AB64" (same as the HACS path above).
+
+**Trade-off**: this bypasses HACS entirely, so you don't get update notifications or one-click updates — when a new version is released, you'll need to repeat steps 1–3 yourself, overwriting the old `custom_components/carr_ab64/` folder. If you have HACS available at all, the installation method above is less maintenance long-term.
+
 ## Configuration
 
 The config flow has two steps:
 
-1. **Connect to AB64 gateway** — enter a **device name** (used as the entry title and, at creation time, feeds the entity IDs generated for this device — you can rename the friendly name later, but the entity IDs themselves won't change), the gateway **host/IP**, and the **port**. Port has no default — check your gateway's own configuration page; an Elfin EW11 commonly defaults to `8899`, not the Modbus-standard `502`.
+1. **Connect to AB64 gateway** — enter a **device name** (used as the entry title and, at creation time, feeds the entity IDs generated for this device — you can rename the friendly name later, but the entity IDs themselves won't change), the gateway **host/IP**, and the **port**. The port field defaults to `502` (the Modbus TCP standard), but that's not always correct — check your gateway's own configuration page, since an Elfin EW11 commonly defaults to `8899` instead.
 2. **Find the unit-id** — leave it blank to scan unit-ids **1–63** and read register 0 on each, or enter a specific unit-id (including `0`) to verify it directly. **Don't trust a DIP-switch reading by eye** — always let the integration confirm the address against a real register read.
    - A full scan can take up to **about a minute**. There's no progress bar while it runs, so it will look idle for a while — let it finish, or enter the unit-id manually if you already know it.
    - If more than one unit-id responds on the gateway, you'll get a **Multiple units found** step to pick the right one (unit-ids already used by another config entry on the same gateway are filtered out of that list automatically). If you're adding a second (or third...) AC unit on a gateway you've already set up, and *every* unit-id that responds turns out to already belong to another entry, you'll get a distinct message telling you so — that's expected and doesn't mean anything is wired wrong; it just means there's nothing new on this gateway to add yet (e.g. a new AB64 box hasn't been wired in, or is still using the same address as one you've already configured).
@@ -47,7 +58,7 @@ The config flow has two steps:
 ### Options
 
 - **Poll interval** — default 30s, minimum 10s (entering a lower value is rejected with an explicit error, not silently clamped). The bus may be shared with other AB64 boxes on the same RS-485 line, so polling too fast adds contention for everyone on it.
-- **Enable advanced telemetry sensors** — **off by default**. Turns on ~12 extra sensors (indoor/outdoor coil, discharge, suction temperatures, fan/compressor RPM, compressor current, filter timer) read from a separate register block. Some of these registers may not exist on every model/firmware — if so, that specific sensor will simply go `unavailable` rather than breaking the rest of the integration.
+- **Enable advanced telemetry sensors** — **off by default**. Turns on ~12 extra sensors (indoor/outdoor coil, discharge, suction temperatures, fan/compressor RPM, compressor current, filter timer) read from a separate register block. Some of these registers may not exist on every model/firmware — if so, the sensors in that register block go `unavailable` together rather than breaking the rest of the integration.
 
 ### Multiple AC units on one gateway
 
@@ -82,7 +93,7 @@ To change IP, port, or unit-id after setup, use the integration's **Reconfigure*
 - **English only** — no other translations are provided.
 - **Advanced telemetry scaling has not been verified against real hardware.** Negative readings (e.g. evaporator temperature during defrost) are decoded as signed (two's complement) values, but neither that signedness assumption nor the raw-to-°C scaling itself is vendor-confirmed — both are inferences from the register map. If you can compare a live advanced-temperature reading against a known-good thermometer, feedback is welcome.
 - **A register value of `0xFFFF` (65535) on any advanced telemetry field is treated as "no value"** and the corresponding sensor goes `unavailable`, rather than being shown as a number — this is the same sentinel convention the device uses for register 11 (see the `ab_bus_link` binary_sensor above).
-- Advanced telemetry registers may not exist on every model/firmware — if a given register isn't supported, that specific sensor goes `unavailable` rather than affecting the rest of the integration.
+- Advanced telemetry registers may not exist on every model/firmware — registers are read one block at a time, so if a block isn't supported, the sensors in that register block go `unavailable` together rather than affecting the rest of the integration.
 
 ## Requirements
 

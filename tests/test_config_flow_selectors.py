@@ -16,6 +16,9 @@ that schema is only built inside async_step_reconfigure, not a module constant.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import voluptuous as vol
 import pytest
 
@@ -29,9 +32,11 @@ from custom_components.carr_ab64.config_flow import (
     STEP_USER_SCHEMA,
     UNIT_ID_SELECTOR,
 )
-from custom_components.carr_ab64.const import CONF_UNIT_ID, DOMAIN
+from custom_components.carr_ab64.const import CONF_UNIT_ID, DEFAULT_PORT, DOMAIN
 
 from tests.conftest import TEST_HOST, TEST_NAME, TEST_PORT, TEST_UNIT_ID, seed_happy_path
+
+INTEGRATION_DIR = Path(__file__).parent.parent / "custom_components" / "carr_ab64"
 
 
 def _marker_for(schema: vol.Schema, key: str):
@@ -41,11 +46,57 @@ def _marker_for(schema: vol.Schema, key: str):
 # --- PORT_SELECTOR --------------------------------------------------------------
 
 
-def test_step_user_schema_port_marker_has_no_default():
-    """Regression guard: if a `default=` ever gets added back to this marker, the
-    frontend quirk this selector exists to fix comes right back."""
+def test_step_user_schema_port_marker_default_is_502():
+    """The "no default" regression guard this test used to be (pre-2026-08-04) was
+    itself pinning a decision the user has since reversed: `references/
+    ac-modbus-ab64-reference.md` warned against defaulting the port because the
+    bring-up EW11 gateway actually used 8899, not 502. On a real HA setup that
+    turned out worse than the risk it was avoiding — an empty NumberSelector box
+    renders as `0`, which `PORT_SELECTOR`'s own `min=1` always rejects, so "no
+    default" guaranteed a submit error instead of just sometimes being wrong.
+
+    The user decided 2026-08-04 to default the field to 502 (the Modbus TCP
+    standard, and what `homeassistant.components.modbus` itself defaults to) and
+    keep the 8899/EW11 warning in the field's `data_description` instead — see
+    `test_port_data_description_still_warns_about_ew11_8899` below for that half.
+
+    Still required, NOT reversed by this decision:
+    - `selector.NumberSelectorMode.BOX` on `PORT_SELECTOR` — keeps this a typeable
+      field instead of a slider; a slider has no sane "unset" position.
+    - `vol.Coerce(int)` on `PORT_SELECTOR` — `NumberSelector` itself returns a
+      float, so a bare `default=502` would submit as `502.0` and corrupt
+      `unique_id` into `"host:502.0:2"` instead of `"host:502:2"`.
+    """
     marker = _marker_for(STEP_USER_SCHEMA, CONF_PORT)
-    assert marker.default is vol.UNDEFINED
+    assert marker.default is not vol.UNDEFINED
+    assert marker.default() == DEFAULT_PORT
+    assert type(marker.default()) is int
+
+
+def test_step_user_schema_untouched_port_submit_yields_int_502():
+    """The scenario the default actually exists for: a user submits the `user`
+    step without touching the port field at all. Must come back as the int `502`,
+    not `502.0` — see the docstring above for why a float would corrupt
+    unique_id. This is now *easier* to hit than before 2026-08-04 (nobody has to
+    type anything for it to happen), which is exactly why the type check matters
+    more now, not less."""
+    validated = STEP_USER_SCHEMA({"name": TEST_NAME, "host": TEST_HOST})
+    assert validated["port"] == 502
+    assert type(validated["port"]) is int
+
+
+def test_port_data_description_still_warns_about_ew11_8899():
+    """Defaulting the port to 502 is only safe *behaviorally* as long as an EW11
+    user (whose gateway actually listens on 8899) still sees a warning telling
+    them to check their gateway's own config page — otherwise the default turns
+    from "usually right, and wrong loudly" into "usually right, and wrong
+    silently" the moment someone trims this string down. Checked in both the
+    `user` and `reconfigure` steps since the same PORT_SELECTOR/text is reused in
+    both."""
+    strings = json.loads((INTEGRATION_DIR / "strings.json").read_text())
+    step = strings["config"]["step"]
+    assert "8899" in step["user"]["data_description"]["port"]
+    assert "8899" in step["reconfigure"]["data_description"]["port"]
 
 
 def test_port_selector_returns_int_not_float():
@@ -79,6 +130,12 @@ def test_step_unit_schema_blank_submit_drops_the_key_entirely():
 
 
 def test_step_unit_schema_marker_has_no_default():
+    """Unlike CONF_PORT (see test_step_user_schema_port_marker_default_is_502
+    above), unit_id must stay default-less: blank submit is a meaningful value
+    here (it means "scan the whole range"), not a placeholder waiting to be
+    filled in — giving it any default would silently steer every user away from
+    the scan path. The 2026-08-04 port-default decision explicitly did not touch
+    this marker; this test guards against someone assuming it should follow."""
     marker = _marker_for(STEP_UNIT_SCHEMA, CONF_UNIT_ID)
     assert marker.default is vol.UNDEFINED
 

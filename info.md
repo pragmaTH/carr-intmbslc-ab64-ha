@@ -8,4 +8,4 @@ Gives you a `climate` entity (on/off, mode, fan speed, swing, setpoint), an erro
 
 Multiple AC units on the same gateway are supported — add one config entry per indoor unit; entries on the same gateway automatically share the underlying connection.
 
-See the [README](https://github.com/PragmaTH/carr-intmbslc-ab64-ha#readme) for full installation, configuration, and troubleshooting instructions.
+See the [README](https://github.com/pragmaTH/carr-intmbslc-ab64-ha#readme) for full installation, configuration, and troubleshooting instructions.

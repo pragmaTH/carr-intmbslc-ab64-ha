@@ -22,6 +22,7 @@ from .const import (
     CONF_ENABLE_ADVANCED,
     CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
+    DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_UNIT_ID_SCAN_RANGE,
     DOMAIN,
@@ -39,14 +40,18 @@ _LOGGER = logging.getLogger(__name__)
 # in const.py) it's ~63s worst case.
 SCAN_PROBE_TIMEOUT = 1.0
 
-# A plain `vol.All(vol.Coerce(int), vol.Range(min=1, ...))` gets rendered by the HA
-# frontend as a number field that shows the range's `min` as a pre-filled value —
-# there's no field left blank, so a user who doesn't know their gateway's port (see
-# the "not defaulted" wording in strings.json) can submit the form untouched and get
-# port 1, which is never correct. A `selector.NumberSelector` renders as a genuinely
-# empty box instead; it validates min/max itself but returns a float, so it's still
-# chained with vol.Coerce(int) to keep CONF_PORT an int everywhere else (unique_id
-# string, AsyncModbusTcpClient(port=...), etc.).
+# Still a selector.NumberSelector (not a plain vol.Range-based validator) so mode=BOX
+# keeps this a typeable number field rather than a slider — a slider has no sensible
+# "type your own port" affordance. It still returns a float, so vol.Coerce(int) stays
+# chained on top: with default=DEFAULT_PORT below, an untouched submit would otherwise
+# come back as 502.0, which breaks equality against the int CONF_PORT stored on other
+# entries (unique_id string, AsyncModbusTcpClient(port=...), etc.).
+#
+# Previously this field had no default, on the theory that NumberSelector renders as
+# an empty box. Confirmed wrong against a real HA setup: it renders 0, which min=1
+# always rejects, so a user who didn't know their port and submitted as-is got an
+# unhelpful validation error instead of an empty field. See DEFAULT_PORT in const.py
+# for why 502 is now used as the default.
 PORT_SELECTOR = vol.All(
     selector.NumberSelector(
         selector.NumberSelectorConfig(min=1, max=65535, mode=selector.NumberSelectorMode.BOX)
@@ -71,7 +76,7 @@ STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): str,
         vol.Required(CONF_HOST): str,
-        vol.Required(CONF_PORT): PORT_SELECTOR,
+        vol.Required(CONF_PORT, default=DEFAULT_PORT): PORT_SELECTOR,
     }
 )
 
@@ -91,17 +96,14 @@ class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
         if user_input is not None:
             self._data = {
-                CONF_HOST: user_input[CONF_HOST],
+                CONF_HOST: user_input[CONF_HOST].strip(),
                 CONF_PORT: user_input[CONF_PORT],
             }
             self._name = user_input[CONF_NAME]
             return await self.async_step_unit()
-        return self.async_show_form(
-            step_id="user", data_schema=STEP_USER_SCHEMA, errors=errors
-        )
+        return self.async_show_form(step_id="user", data_schema=STEP_USER_SCHEMA)
 
     async def async_step_unit(
         self, user_input: dict[str, Any] | None = None
@@ -176,7 +178,7 @@ class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         entry = self._get_reconfigure_entry()
         if user_input is not None:
-            host = user_input[CONF_HOST]
+            host = user_input[CONF_HOST].strip()
             port = user_input[CONF_PORT]
             unit_id = user_input[CONF_UNIT_ID]
             unique_id = f"{host}:{port}:{unit_id}"

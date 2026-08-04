@@ -101,6 +101,14 @@ AB_BUS_ERROR_VALUE = 65535
 AB_BUS_FAULT_DEBOUNCE_SECONDS = 20
 
 # --- Defaults ---
+# 502 is the Modbus TCP standard port and the default homeassistant.components.modbus
+# itself uses. This reverses the earlier "don't default the port" guidance in
+# references/ac-modbus-ab64-reference.md (decision reversed by the user 2026-08-04):
+# the empty NumberSelector box was rendering as 0, which min=1 always rejects, so the
+# old "no default" behavior guaranteed a submit error rather than avoiding one. The
+# risk this was meant to avoid (e.g. an Elfin EW11 actually defaulting to 8899) is now
+# covered by a warning in the port field's data_description instead of an empty field.
+DEFAULT_PORT = 502
 DEFAULT_SCAN_INTERVAL = 30
 MIN_SCAN_INTERVAL = 10
 DEFAULT_UNIT_ID_SCAN_RANGE = range(0, 64)  # 0-63, full DIP address space per manual

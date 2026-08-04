@@ -420,6 +420,59 @@ async def test_reconfigure_cannot_connect(hass, fake_clients):
     assert unchanged.data["host"] == TEST_HOST
 
 
+# --- n2: host input is stripped of leading/trailing whitespace ------------------
+
+
+async def test_user_step_strips_whitespace_from_host(hass, fake_clients):
+    """n2 (review/core-fix6-review.md): a host pasted from the gateway's own config
+    page often carries leading/trailing whitespace. Without stripping it, the
+    unstripped host both fails to connect (`cannot_connect`, with no hint that
+    whitespace is the actual cause — the failure looks identical to a genuinely
+    wrong IP) and would corrupt unique_id with embedded spaces if it somehow did
+    connect. Must be stripped before it's ever used to look up/create the shared
+    hub, not just before being written to entry.data — this test proves the
+    round trip, not just the final stored string."""
+    client = seed_happy_path(fake_clients)
+    client.only_respond_to_known_units = True
+
+    result = await _start_user_flow(hass, host=f"  {TEST_HOST}  ")
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["data"]["host"] == TEST_HOST
+    assert " " not in result["result"].unique_id
+
+
+async def test_reconfigure_strips_whitespace_from_host(hass, fake_clients):
+    """n2, reconfigure side: the same whitespace hazard applies to the reconfigure
+    step's host field, entered separately from the user step's."""
+    seed_happy_path(fake_clients, unit_id=2)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"host": TEST_HOST, "port": TEST_PORT, CONF_UNIT_ID: 2},
+        unique_id=f"{TEST_HOST}:{TEST_PORT}:2",
+        title=TEST_NAME,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {"host": f"  {TEST_HOST}  ", "port": TEST_PORT, CONF_UNIT_ID: 2},
+    )
+    await hass.async_block_till_done()
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    updated = hass.config_entries.async_get_entry(entry.entry_id)
+    assert updated.data["host"] == TEST_HOST
+    assert " " not in updated.unique_id
+
+
 async def test_reconfigure_read_timeout(hass, fake_clients):
     client = seed_happy_path(fake_clients, unit_id=2)
     entry = MockConfigEntry(

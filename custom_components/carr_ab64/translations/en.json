@@ -10,8 +10,8 @@
           "port": "Gateway TCP port"
         },
         "data_description": {
-          "name": "Used to generate this AC's entity IDs the first time they're created (e.g. climate.living_room for a name like \"Living room\") — you can rename the display name later, but not the entity ID itself. A single gateway is often shared by several AC units, each as its own entry, so name this one after the AC/room, not the gateway.",
-          "port": "The TCP port your gateway listens on for Modbus — check the gateway's own configuration page, since it varies by brand and model (e.g. an Elfin EW11 defaults to 8899; some other gateways default to 502)."
+          "name": "Sets this AC's entity IDs when they are first created — name it after the AC unit or room, not the gateway.",
+          "port": "The TCP port your gateway listens on for Modbus — 502 is the Modbus standard, but check your gateway's own configuration page (an Elfin EW11 defaults to 8899)."
         }
       },
       "unit": {
@@ -40,7 +40,7 @@
           "unit_id": "AB64 unit-id / DIP switch address"
         },
         "data_description": {
-          "port": "The TCP port your gateway listens on for Modbus — check the gateway's own configuration page, since it varies by brand and model (e.g. an Elfin EW11 defaults to 8899; some other gateways default to 502)."
+          "port": "The TCP port your gateway listens on for Modbus — 502 is the Modbus standard, but check your gateway's own configuration page (an Elfin EW11 defaults to 8899)."
         }
       }
     },

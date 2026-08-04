@@ -20,8 +20,10 @@ from custom_components.carr_ab64.const import (
     ADV_NO_VALUE,
     ADV_OUTDOOR_START,
     CONF_ENABLE_ADVANCED,
+    CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
     DOMAIN,
+    REG_SW_VERSION,
 )
 from custom_components.carr_ab64.coordinator import AB64Coordinator
 
@@ -295,6 +297,102 @@ async def test_hub_released_when_forward_entry_setups_fails(hass, fake_clients):
         hass.config_entries, "async_forward_entry_setups", side_effect=RuntimeError("boom")
     ):
         result = await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert result is False
+    domain_data = hass.data.get(DOMAIN, {})
+    assert (TEST_HOST, TEST_PORT) not in domain_data.get("hubs", {}), (
+        "hub entry must be gone (refcount rolled back to 0), not leaked"
+    )
+    assert client.close_calls == 1
+
+
+async def test_setup_succeeds_with_sw_version_none_when_sw_version_read_fails_normally(
+    hass, fake_clients
+):
+    """Sibling of the m1 test above, guarding the *other* direction: the inner
+    try/except around the sw_version read in async_setup_entry is deliberately
+    narrower than the outer one (it only catches AB64ReadError/
+    ConnectionException). A normal read failure there — timeout or error
+    response, exactly what a unit that doesn't expose register 50 would produce
+    — must still degrade to sw_version = None with setup succeeding, not abort
+    the whole entry. Written alongside the RuntimeError test below because
+    widening the outer except to fix m1 is exactly the kind of change that could
+    accidentally swallow this distinction if the inner try/except got flattened
+    away instead of kept nested."""
+    client = seed_happy_path(fake_clients)
+    client.fail_read_at(TEST_UNIT_ID, REG_SW_VERSION)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.sw_version is None
+
+
+async def test_hub_released_when_sw_version_read_raises_unexpected_error(
+    hass, fake_clients, monkeypatch
+):
+    """m1, the actual finding: `async_acquire_hub()` bumps refcount, but (before
+    this fix) only the try/except around
+    `async_config_entry_first_refresh`/`async_forward_entry_setups` rolled it
+    back — the sw_version read sat in its own narrower try/except just above that
+    only catches (AB64ReadError, ConnectionException). Anything else raised
+    there used to escape async_setup_entry entirely, past the rollback.
+
+    hub.py:84 has a real RuntimeError for exactly this: if none of pymodbus's
+    known unit-id kwarg names (`device_id`/`slave`/`unit`) match the installed
+    client's signature. Trigger it for real — not a fabricated exception — by
+    clearing the candidate list so _resolve_unit_kwarg's own code takes that
+    branch, simulating an incompatible future pymodbus version."""
+    client = seed_happy_path(fake_clients)
+    monkeypatch.setattr("custom_components.carr_ab64.hub._UNIT_KWARG_CANDIDATES", ())
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert result is False
+    domain_data = hass.data.get(DOMAIN, {})
+    assert (TEST_HOST, TEST_PORT) not in domain_data.get("hubs", {}), (
+        "hub entry must be gone (refcount rolled back to 0), not leaked"
+    )
+    assert client.close_calls == 1
+
+
+async def test_hub_released_when_coordinator_construction_raises(hass, fake_clients):
+    """m1 follow-up: `coordinator = AB64Coordinator(hass, entry, hub)` was moved
+    inside the same outer try/except as the sw_version read (see the comment in
+    __init__.py) specifically because coordinator construction itself can raise
+    — e.g. a `TypeError` out of `timedelta(seconds=scan_interval)` in
+    AB64Coordinator.__init__ if a non-numeric scan_interval ever reaches
+    entry.options (bad migration / hand-edited .storage). Before that move, a
+    failure here escaped async_setup_entry without rolling back the refcount
+    bumped by async_acquire_hub() just above — the same leak class as the
+    original m1 finding, one line earlier.
+
+    A mutation test (reviewer, review/portdefault-review.md m-1) found this
+    specific line had no test pinning it: reverting just the "coordinator inside
+    try" move left all 118 tests green. This is that missing pin — verified by
+    moving `coordinator = AB64Coordinator(...)` back outside the try on a
+    disposable scratch copy of this package and confirming this test alone then
+    fails (see done/qa-portdefault-m1.md for the transcript); the real
+    custom_components/ tree was never touched to do that check.
+
+    The other justification once floated for putting this line inside the try —
+    a `KeyError` from `entry.data[CONF_UNIT_ID]` if that key is ever missing —
+    doesn't actually apply: `__init__.py`'s `unit_id = entry.data[CONF_UNIT_ID]`
+    runs *before* `async_acquire_hub()` is even called, so a missing key blows up
+    before there's any refcount to leak in the first place. Only the
+    scan_interval/TypeError path is reachable *after* the hub is acquired, which
+    is what makes it the one worth a regression test."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry(options={CONF_SCAN_INTERVAL: "abc"})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
     assert result is False
