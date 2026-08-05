@@ -18,7 +18,10 @@ from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
+from .climate import MODE_TO_HVAC
 from .const import (
+    BASIC_BLOCK_COUNT,
+    BASIC_BLOCK_START,
     CONF_ENABLE_ADVANCED,
     CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
@@ -29,15 +32,15 @@ from .const import (
     MIN_SCAN_INTERVAL,
     REG_ON_OFF,
 )
-from .hub import AB64ReadError, async_acquire_hub, async_release_hub
+from .coordinator import BASIC_REG_OFFSETS
+from .hub import AB64Hub, AB64ReadError, async_acquire_hub, async_release_hub
 
 _LOGGER = logging.getLogger(__name__)
 
 # Per-candidate probe timeout while scanning the unit-id range — separate from the
 # hub's normal 3s/1-retry timeout (AB64Hub.MODBUS_TIMEOUT), which stays untouched for
-# regular polling. A full 0-63 scan at 3s/candidate was ~190s with no progress
-# indicator; at 1s/candidate (and skipping address 0, see DEFAULT_UNIT_ID_SCAN_RANGE
-# in const.py) it's ~63s worst case.
+# regular polling. A full 64-address scan at 3s/candidate was ~192s with no progress
+# indicator; at 1s/candidate it's ~64s worst case.
 SCAN_PROBE_TIMEOUT = 1.0
 
 # Still a selector.NumberSelector (not a plain vol.Range-based validator) so mode=BOX
@@ -61,26 +64,33 @@ PORT_SELECTOR = vol.All(
 
 # Same reasoning/shape as PORT_SELECTOR (a plain vol.Range-based validator renders as
 # a number field/slider that can't be left empty on the frontend). This one matters
-# even more: unit_id is genuinely optional (blank = scan the whole range), and 0 is
-# the Modbus broadcast address that never answers, so a widget that can't render
-# "empty" would silently steer every user away from the scan path. mode=BOX (not
-# SLIDER) is required for a slider-type widget to have no natural "unset" position.
+# even more: unit_id is genuinely optional (blank = scan), and the 1-64 range (not
+# 0-something) reflects that the vendor's SW1+SW2 address table is 1-based — see
+# DEFAULT_UNIT_ID_SCAN_RANGE in const.py. mode=BOX (not SLIDER) is required for a
+# slider-type widget to have no natural "unset" position.
 UNIT_ID_SELECTOR = vol.All(
     selector.NumberSelector(
-        selector.NumberSelectorConfig(min=0, max=63, mode=selector.NumberSelectorMode.BOX)
+        selector.NumberSelectorConfig(min=1, max=64, mode=selector.NumberSelectorMode.BOX)
     ),
     vol.Coerce(int),
 )
 
+# unit_id is `vol.Optional` with no default — deliberately left blank-able (blank =
+# scan every address; see async_step_user). It used to live in its own step
+# (`STEP_UNIT_SCHEMA`/`async_step_unit`), but that gave the flow three different
+# behaviors depending on how many units a scan found (silently finish on 1 hit, ask
+# on >1, silently finish again once the first one's taken by another entry) —
+# decision 2026-08-05: fold it into this schema and never auto-pick, so the flow has
+# exactly one shape: fill it in and verify directly, or leave it blank and always
+# confirm from the scan results (see async_step_select_unit).
 STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): str,
         vol.Required(CONF_HOST): str,
         vol.Required(CONF_PORT, default=DEFAULT_PORT): PORT_SELECTOR,
+        vol.Optional(CONF_UNIT_ID): UNIT_ID_SELECTOR,
     }
 )
-
-STEP_UNIT_SCHEMA = vol.Schema({vol.Optional(CONF_UNIT_ID): UNIT_ID_SELECTOR})
 
 
 class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -92,66 +102,89 @@ class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
         self._data: dict[str, Any] = {}
         self._name: str = ""
         self._found_units: list[int] = []
+        self._unit_labels: dict[int, str] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
             self._data = {
                 CONF_HOST: user_input[CONF_HOST].strip(),
                 CONF_PORT: user_input[CONF_PORT],
             }
             self._name = user_input[CONF_NAME]
-            return await self.async_step_unit()
-        return self.async_show_form(step_id="user", data_schema=STEP_USER_SCHEMA)
-
-    async def async_step_unit(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        errors: dict[str, str] = {}
-        if user_input is not None:
             manual_id = user_input.get(CONF_UNIT_ID)
-            if manual_id is not None:
-                candidates = [manual_id]
-            else:
-                # Unit-id 0 is the Modbus broadcast address and never answers a
-                # read — skip it in a full scan (a user can still type 0 manually;
-                # it will just fail verification with a message pointing at the
-                # DIP switch, see strings.json).
-                candidates = [u for u in DEFAULT_UNIT_ID_SCAN_RANGE if u != 0]
+            candidates = [manual_id] if manual_id is not None else list(
+                DEFAULT_UNIT_ID_SCAN_RANGE
+            )
             try:
-                found = await self._async_scan_units(candidates)
+                hub = await async_acquire_hub(
+                    self.hass, self._data[CONF_HOST], self._data[CONF_PORT]
+                )
             except ConnectionException:
                 errors["base"] = "cannot_connect"
             else:
-                error_key: str | None = None
-                if manual_id is None:
-                    # Don't offer unit-ids that already belong to another entry on
-                    # this same host:port — picking one would just abort the flow.
-                    responded = found
-                    already_configured = self._configured_unit_ids(
-                        self._data[CONF_HOST], self._data[CONF_PORT]
-                    )
-                    found = [u for u in responded if u not in already_configured]
-                    if not found:
-                        # Distinguish "nothing on the bus answered" (wiring/baud/
-                        # gateway problem) from "everything that answered is
-                        # already another entry" (normal when adding a 2nd AC on
-                        # the same gateway) — the fix for each is completely
-                        # different and pointing at wiring here would be wrong.
-                        error_key = "all_units_already_configured" if responded else "no_units_found"
-                elif not found:
-                    error_key = "read_timeout"
+                # One acquire covers both scanning and (on the scan path) building
+                # confirmation-page labels below — acquiring a second time for the
+                # labels used to close/reconnect the shared client mid-flow (3
+                # connects/2 closes per submission) and let a second connect failure
+                # escape as an unhandled exception instead of becoming
+                # cannot_connect. Release happens in `finally` no matter which
+                # branch returns, so a failure here can't leak the refcount the way
+                # the m1 setup-entry bug did.
+                try:
+                    found = await self._async_scan_units(hub, candidates)
 
-                if error_key:
-                    errors["base"] = error_key
-                elif len(found) == 1:
-                    return await self._async_finish_unit(found[0])
-                else:
-                    self._found_units = found
-                    return await self.async_step_select_unit()
+                    error_key: str | None = None
+                    if manual_id is None:
+                        # Don't offer unit-ids that already belong to another entry
+                        # on this same host:port — picking one would just abort the
+                        # flow.
+                        responded = found
+                        already_configured = self._configured_unit_ids(
+                            self._data[CONF_HOST], self._data[CONF_PORT]
+                        )
+                        found = [u for u in responded if u not in already_configured]
+                        if not found:
+                            # Distinguish "nothing on the bus answered" (wiring/baud/
+                            # gateway problem) from "everything that answered is
+                            # already another entry" (normal when adding a 2nd AC on
+                            # the same gateway) — the fix for each is completely
+                            # different and pointing at wiring here would be wrong.
+                            error_key = "all_units_already_configured" if responded else "no_units_found"
+                    elif not found:
+                        error_key = "read_timeout"
+
+                    if error_key:
+                        errors["base"] = error_key
+                    elif manual_id is not None:
+                        # Typed in and verified directly — the user already knows
+                        # which physical unit this is, so finish immediately. Only
+                        # the scan path below ever shows a confirmation page.
+                        return await self._async_finish_unit(found[0])
+                    else:
+                        # Blank input => scanned. Always confirm, even when exactly
+                        # one unit responded — decision 2026-08-05: no auto-pick, so
+                        # this step behaves the same way regardless of how many
+                        # units answer.
+                        self._found_units = found
+                        self._unit_labels = await self._async_build_unit_labels(
+                            hub, found
+                        )
+                        return await self.async_step_select_unit()
+                except ConnectionException:
+                    errors["base"] = "cannot_connect"
+                finally:
+                    await async_release_hub(
+                        self.hass, self._data[CONF_HOST], self._data[CONF_PORT]
+                    )
         return self.async_show_form(
-            step_id="unit", data_schema=STEP_UNIT_SCHEMA, errors=errors
+            step_id="user",
+            data_schema=self.add_suggested_values_to_schema(
+                STEP_USER_SCHEMA, user_input
+            ),
+            errors=errors,
         )
 
     def _configured_unit_ids(self, host: str, port: int) -> set[int]:
@@ -167,10 +200,40 @@ class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             return await self._async_finish_unit(int(user_input[CONF_UNIT_ID]))
-        schema = vol.Schema(
-            {vol.Required(CONF_UNIT_ID): vol.In({u: str(u) for u in self._found_units})}
-        )
+        schema = vol.Schema({vol.Required(CONF_UNIT_ID): vol.In(self._unit_labels)})
         return self.async_show_form(step_id="select_unit", data_schema=schema)
+
+    async def _async_build_unit_labels(
+        self, hub: AB64Hub, units: list[int]
+    ) -> dict[int, str]:
+        """Read each responding unit's basic block once (read-only FC03) so the
+        confirmation page can show real state instead of a bare unit-id — otherwise
+        there's no way to tell which physical AC a given number belongs to. This is
+        informational only: a read failure for one unit degrades that unit's label to
+        a bare number, it never raises or aborts the flow.
+
+        Takes an already-acquired hub instead of acquiring its own — see
+        async_step_user, which acquires one hub covering both scanning and this,
+        so the flow only connects once per submission instead of the shared client
+        being closed and reconnected mid-flow.
+        """
+        labels: dict[int, str] = {}
+        for unit_id in units:
+            try:
+                regs = await hub.async_read_holding(
+                    unit_id, BASIC_BLOCK_START, BASIC_BLOCK_COUNT
+                )
+            except (AB64ReadError, ConnectionException):
+                labels[unit_id] = str(unit_id)
+                continue
+            if regs[BASIC_REG_OFFSETS["on_off"]] == 0:
+                labels[unit_id] = f"{unit_id} — off"
+                continue
+            hvac_mode = MODE_TO_HVAC.get(regs[BASIC_REG_OFFSETS["mode"]])
+            mode_name = hvac_mode.value if hvac_mode else "unknown mode"
+            set_temp = regs[BASIC_REG_OFFSETS["set_temp"]]
+            labels[unit_id] = f"{unit_id} — on · {mode_name} · set {set_temp} °C"
+        return labels
 
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
@@ -230,25 +293,25 @@ class AB64ConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="reconfigure", data_schema=data_schema, errors=errors
         )
 
-    async def _async_scan_units(self, candidates: list[int]) -> list[int]:
-        """Try reading register 0 for each candidate unit_id through the shared hub.
+    async def _async_scan_units(self, hub: AB64Hub, candidates: list[int]) -> list[int]:
+        """Try reading register 0 for each candidate unit_id through the given hub.
 
         Each probe is bounded by SCAN_PROBE_TIMEOUT, separate from the hub's normal
         read timeout, so a full-range scan doesn't cost ~3s per non-existent unit_id.
+
+        Takes an already-acquired hub instead of acquiring its own — see
+        async_step_user, which owns the single acquire/release pair covering both
+        this scan and (on the scan path) building confirmation-page labels.
         """
-        hub = await async_acquire_hub(self.hass, self._data[CONF_HOST], self._data[CONF_PORT])
-        try:
-            found: list[int] = []
-            for unit_id in candidates:
-                try:
-                    async with asyncio.timeout(SCAN_PROBE_TIMEOUT):
-                        await hub.async_read_holding(unit_id, REG_ON_OFF, 1)
-                except (AB64ReadError, TimeoutError):
-                    continue
-                found.append(unit_id)
-            return found
-        finally:
-            await async_release_hub(self.hass, self._data[CONF_HOST], self._data[CONF_PORT])
+        found: list[int] = []
+        for unit_id in candidates:
+            try:
+                async with asyncio.timeout(SCAN_PROBE_TIMEOUT):
+                    await hub.async_read_holding(unit_id, REG_ON_OFF, 1)
+            except (AB64ReadError, TimeoutError):
+                continue
+            found.append(unit_id)
+        return found
 
     async def _async_finish_unit(self, unit_id: int) -> ConfigFlowResult:
         unique_id = f"{self._data[CONF_HOST]}:{self._data[CONF_PORT]}:{unit_id}"

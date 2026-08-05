@@ -110,12 +110,23 @@ AB_BUS_FAULT_DEBOUNCE_SECONDS = 20
 # covered by a warning in the port field's data_description instead of an empty field.
 DEFAULT_PORT = 502
 DEFAULT_SCAN_INTERVAL = 30
-MIN_SCAN_INTERVAL = 10
-DEFAULT_UNIT_ID_SCAN_RANGE = range(0, 64)  # 0-63, full DIP address space per manual
-# Unit-id 0 is the Modbus broadcast address — a slave never replies to a read
-# addressed to 0, regardless of what the DIP switches show. config_flow skips it
-# during a full-range scan (a manually entered 0 still gets probed and will fail
-# verification, pointing the user at the DIP switch instead of silently hanging).
+# Lowered from 10 (2026-08-05): after a climate command, users want the card to
+# reflect a value actually read back rather than an optimistic one we just wrote —
+# the fix is to poll faster, not to fake the state. 1s is only safe together with
+# MAX_CONSECUTIVE_READ_FAILURES below: a single dropped RS-485 frame at this
+# interval is common and must not flap every entity to unavailable.
+MIN_SCAN_INTERVAL = 1
+# Consecutive failed basic-block reads the coordinator tolerates — holding onto the
+# last known self.data — before it raises UpdateFailed. Exists specifically to make
+# MIN_SCAN_INTERVAL = 1 usable: without this, one missed frame at a 1s interval would
+# make every entity flicker unavailable far more often than at the old 10s floor.
+MAX_CONSECUTIVE_READ_FAILURES = 3
+# Full DIP address space, 64 values starting at 1 (not 0): the vendor's SW1+SW2
+# table is 1-based (unit-id = SW2 * 16 + SW1 + 1 — confirmed against the table's own
+# worked examples, e.g. SW2=0,SW1=0 -> 1 and SW2=3,SW1=15 -> 64). This corrects
+# references/ac-modbus-ab64-reference.md:54, which had the lower end wrong — a
+# transcription error, not a hardware quirk; address 0 was never valid.
+DEFAULT_UNIT_ID_SCAN_RANGE = range(1, 65)
 
 # --- Error code table (register 11), reference section 6 ---
 # key = decimal code, value = (remote_code, description, category).

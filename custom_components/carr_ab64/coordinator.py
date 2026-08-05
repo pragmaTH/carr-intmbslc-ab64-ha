@@ -30,6 +30,7 @@ from .const import (
     CONF_UNIT_ID,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    MAX_CONSECUTIVE_READ_FAILURES,
     REG_ERROR,
     REG_FAN,
     REG_MODE,
@@ -76,6 +77,7 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
         self.unit_id: int = entry.data[CONF_UNIT_ID]
         self.sw_version: str | None = None
         self._fault_since: datetime | None = None
+        self._consecutive_failures = 0
 
     @property
     def advanced_enabled(self) -> bool:
@@ -87,8 +89,28 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
                 self.unit_id, BASIC_BLOCK_START, BASIC_BLOCK_COUNT
             )
         except (AB64ReadError, ConnectionException) as err:
+            self._consecutive_failures += 1
+            # self.data is None on the very first poll (during
+            # async_config_entry_first_refresh) — that case must always raise so HA
+            # surfaces ConfigEntryNotReady instead of "successfully" setting up an
+            # entry that has never read anything. Once there's a known-good value,
+            # tolerate a run of misses (see MAX_CONSECUTIVE_READ_FAILURES in
+            # const.py) instead of flapping every entity to unavailable on one
+            # dropped RS-485 frame — this matters more now that MIN_SCAN_INTERVAL is
+            # 1s.
+            if self.data is not None and self._consecutive_failures < MAX_CONSECUTIVE_READ_FAILURES:
+                _LOGGER.debug(
+                    "Basic block read failed for unit %s (%s/%s consecutive "
+                    "failures), keeping last known data: %s",
+                    self.unit_id,
+                    self._consecutive_failures,
+                    MAX_CONSECUTIVE_READ_FAILURES,
+                    err,
+                )
+                return self.data
             raise UpdateFailed(str(err)) from err
 
+        self._consecutive_failures = 0
         error_code = regs[BASIC_REG_OFFSETS["error_code"]]
         ab_bus_fault = self._compute_ab_bus_fault(error_code)
 

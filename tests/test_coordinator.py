@@ -23,6 +23,7 @@ from custom_components.carr_ab64.const import (
     CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
     DOMAIN,
+    MAX_CONSECUTIVE_READ_FAILURES,
     REG_SW_VERSION,
 )
 from custom_components.carr_ab64.coordinator import AB64Coordinator
@@ -112,6 +113,102 @@ async def test_read_timeout_after_connect_is_distinct_from_connect_failure(
     assert entry.state == ConfigEntryState.SETUP_RETRY
     assert "simulated read failure" in caplog.text or "read" in caplog.text.lower()
     assert "unable to connect" not in caplog.text.lower()
+
+
+# --- workstream C (unitstep topic, 2026-08-05): tolerate a run of consecutive
+# basic-block read failures instead of going unavailable on one dropped frame —
+# this is the mechanism that makes MIN_SCAN_INTERVAL == 1 usable (item 16). -------
+
+
+async def test_two_consecutive_misses_stay_available_third_goes_unavailable(hass, fake_clients):
+    """Item 16, bullets 1+2: one good poll, then two consecutive basic-block read
+    failures — the climate entity must stay available and keep showing the last
+    good reading (not go blank), since MAX_CONSECUTIVE_READ_FAILURES == 3. The
+    3rd consecutive miss crosses the threshold: last_update_success must flip
+    False and the entity must go unavailable."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+    assert coordinator.data["set_temp"] == 22
+
+    client.fail_read_at(TEST_UNIT_ID, 0)
+
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    assert coordinator.data["set_temp"] == 22  # still last known value, not blank
+    state = hass.states.get("climate.living_room_ac")
+    assert state.state != "unavailable"
+
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    assert coordinator.data["set_temp"] == 22
+    state = hass.states.get("climate.living_room_ac")
+    assert state.state != "unavailable"
+
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is False
+    state = hass.states.get("climate.living_room_ac")
+    assert state.state == "unavailable"
+
+
+async def test_consecutive_failure_counter_resets_on_success_not_accumulated(
+    hass, fake_clients
+):
+    """Item 16, bullet 3: 2 misses, then a success, then 2 more misses must NOT
+    add up to a "4th miss" unavailable — the counter has to reset to 0 on any
+    successful poll, not just decrement or keep climbing across an intervening
+    success."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+
+    client.fail_read_at(TEST_UNIT_ID, 0)
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True  # 2 misses, still under threshold
+
+    client.clear_fail_read_at(TEST_UNIT_ID)
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+
+    client.fail_read_at(TEST_UNIT_ID, 0)
+    await coordinator.async_refresh()
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True, (
+        "counter must have reset at the success in between, not accumulated to 4"
+    )
+
+
+async def test_first_poll_failure_still_raises_config_entry_not_ready(hass, fake_clients):
+    """Item 16, bullet 4 — the safety rail on the tolerance mechanism above:
+    coordinator.data is None during the very first refresh
+    (async_config_entry_first_refresh), so the "tolerate N misses" branch must
+    never apply there — swallowing the very first failure would let an entry
+    finish setup having never successfully read anything, which is worse than
+    the flakiness this feature exists to smooth over. This is the same guarantee
+    as the pre-existing test_read_timeout_after_connect_is_distinct_from_
+    connect_failure (case 7) above; kept as its own named test so this specific
+    coupling to the consecutive-failures feature is pinned under its own name
+    rather than relying on someone remembering case 7 also covers it."""
+    client = seed_happy_path(fake_clients)
+    client.fail_read_at(TEST_UNIT_ID, 0)
+
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert result is False
+    from homeassistant.config_entries import ConfigEntryState
+
+    assert entry.state == ConfigEntryState.SETUP_RETRY
 
 
 async def test_single_poll_65535_does_not_flag_fault_yet(hass, fake_clients):

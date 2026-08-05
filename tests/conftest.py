@@ -54,6 +54,7 @@ class FakeModbusClient:
         self.close_calls = 0
         self.registers: dict[int, dict[int, int]] = {}
         self.fail_read_addresses: dict[int, set[int]] = {}
+        self.fail_read_block_addresses: dict[int, dict[int, set[int]]] = {}
         # Distinct from fail_read_addresses/fail_write: those simulate a raised
         # ModbusException (transport-level timeout/no-response). These simulate a
         # *successful* Modbus transaction that comes back as an exception response
@@ -79,6 +80,15 @@ class FakeModbusClient:
         # Per-unit override of op_delay, for simulating one slow/hung candidate on
         # the bus during a scan while others still respond quickly.
         self.delay_per_unit: dict[int, float] = {}
+        # Simulates the physical connection dropping partway through a sequence of
+        # reads (e.g. between config_flow's scan phase and its label-building
+        # phase, both of which now share one AB64Hub/connection — qa-unitstep-m1):
+        # after exactly this many total read_holding_registers calls, `connected`
+        # flips False, so AB64Hub.async_read_holding's own `if not
+        # self._client.connected` check raises a real ConnectionException on the
+        # *next* call — not a fabricated one. None (default) never disconnects.
+        self.disconnect_after_n_reads: int | None = None
+        self._read_count = 0
 
     def set_registers(self, unit_id: int, start: int, values: list[int]) -> None:
         self.known_units.add(unit_id)
@@ -88,6 +98,20 @@ class FakeModbusClient:
 
     def fail_read_at(self, unit_id: int, *addresses: int) -> None:
         self.fail_read_addresses.setdefault(unit_id, set()).update(addresses)
+
+    def clear_fail_read_at(self, unit_id: int) -> None:
+        """Undo fail_read_at for this unit_id — lets a test simulate "back to
+        healthy" mid-run (e.g. proving a consecutive-failure counter resets on
+        success rather than only ever climbing)."""
+        self.fail_read_addresses.pop(unit_id, None)
+
+    def fail_read_block_at(self, unit_id: int, address: int, count: int) -> None:
+        """Like fail_read_at, but scoped to one exact (address, count) pair —
+        e.g. failing only a multi-register block read at an address without
+        also failing a single-register probe at that same starting address
+        (config_flow's scan probe and its unit-label read both start at
+        BASIC_BLOCK_START/REG_ON_OFF == 0, differing only in count)."""
+        self.fail_read_block_addresses.setdefault(unit_id, {}).setdefault(address, set()).add(count)
 
     def error_response_at_read(self, unit_id: int, *addresses: int) -> None:
         """Next read(s) at these addresses succeed at the transport level but come
@@ -106,6 +130,11 @@ class FakeModbusClient:
         self.connected = False
 
     async def read_holding_registers(self, address: int, *, count: int = 1, slave: int = 1):
+        self._read_count += 1
+        if self._read_count == self.disconnect_after_n_reads:
+            # Flip after this call returns/raises — visible to AB64Hub's connected
+            # check on the *next* call, not this one.
+            self.connected = False
         self.read_log.append((slave, address, count))
         self.op_log.append(f"read_start:{slave}:{address}")
         delay = self.delay_per_unit.get(slave, self.op_delay)
@@ -114,7 +143,8 @@ class FakeModbusClient:
 
             await asyncio.sleep(delay)
         unknown_unit = self.only_respond_to_known_units and slave not in self.known_units
-        if unknown_unit or address in self.fail_read_addresses.get(slave, set()):
+        block_failure = count in self.fail_read_block_addresses.get(slave, {}).get(address, set())
+        if unknown_unit or address in self.fail_read_addresses.get(slave, set()) or block_failure:
             self.op_log.append(f"read_end:{slave}:{address}")
             raise ModbusException(f"simulated read failure at {address} (unit {slave})")
         if address in self.error_response_read_addresses.get(slave, set()):

@@ -47,24 +47,29 @@ async def test_default_scan_interval_is_30(hass, fake_clients):
 
 
 async def test_scan_interval_below_minimum_is_validation_error_not_clamped(hass, fake_clients):
-    """Case 22: 5 -> rejected with an explicit error, entry.options untouched
-    (must NOT silently clamp to 10); 10 -> accepted."""
+    """Case 22 (updated 2026-08-05, workstream C item 15): MIN_SCAN_INTERVAL was
+    lowered from 10 to 1 so a user can poll fast enough to measure how long a
+    climate command actually takes to reflect back (they explicitly rejected
+    optimistic state — see plan-unitstep.md workstream C). 0 -> rejected with an
+    explicit error, entry.options untouched (must NOT silently clamp); 1 ->
+    accepted (previously invalid under the old floor of 10, now the floor
+    itself)."""
     entry = await _setup_entry(hass, fake_clients)
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {CONF_SCAN_INTERVAL: 5, CONF_ENABLE_ADVANCED: False}
+        result["flow_id"], {CONF_SCAN_INTERVAL: 0, CONF_ENABLE_ADVANCED: False}
     )
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {CONF_SCAN_INTERVAL: "scan_interval_too_low"}
     assert CONF_SCAN_INTERVAL not in entry.options
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {CONF_SCAN_INTERVAL: 10, CONF_ENABLE_ADVANCED: False}
+        result["flow_id"], {CONF_SCAN_INTERVAL: 1, CONF_ENABLE_ADVANCED: False}
     )
     assert result["type"] == FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
-    assert entry.options[CONF_SCAN_INTERVAL] == 10
+    assert entry.options[CONF_SCAN_INTERVAL] == 1
 
 
 async def test_advanced_telemetry_off_by_default_creates_no_advanced_entities(

@@ -1,7 +1,8 @@
 """Shared Modbus TCP hub for AB64 boxes, keyed by (host, port).
 
 Multiple AB64 boxes sharing one TCP<->RTU gateway is the vendor's standard
-topology (up to 63 boxes per RS-485 bus). RS-485 can only carry one frame at a
+topology (up to 64 boxes per RS-485 bus, matching the 1-64 SW1+SW2 address space —
+see DEFAULT_UNIT_ID_SCAN_RANGE in const.py). RS-485 can only carry one frame at a
 time, so every config entry pointing at the same (host, port) MUST share a single
 `AsyncModbusTcpClient` and a single `asyncio.Lock` covering both reads and writes,
 even though each entry only talks to its own unit_id.

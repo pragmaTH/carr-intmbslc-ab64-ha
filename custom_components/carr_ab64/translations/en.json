@@ -3,30 +3,22 @@
     "step": {
       "user": {
         "title": "Add an air conditioner",
-        "description": "Set up one AC indoor unit connected through an AB64 box and a Modbus TCP↔RTU gateway (e.g. an Elfin EW11). Name it after the AC unit or the room it's in, not the gateway (see below) — host and port are the gateway's own TCP connection, not the AB64 box's own address, which you'll set in the next step.",
+        "description": "Set up one AC indoor unit connected through an AB64 box and a Modbus TCP↔RTU gateway (e.g. an Elfin EW11). Name it after the AC unit or the room it's in, not the gateway (see below) — host and port are the gateway's own TCP connection, while unit-id below is the AB64 box's own address on that gateway.",
         "data": {
           "name": "Air conditioner name",
           "host": "Gateway host / IP address",
-          "port": "Gateway TCP port"
-        },
-        "data_description": {
-          "name": "Sets this AC's entity IDs when they are first created — name it after the AC unit or room, not the gateway.",
-          "port": "The TCP port your gateway listens on for Modbus — 502 is the Modbus standard, but check your gateway's own configuration page (an Elfin EW11 defaults to 8899)."
-        }
-      },
-      "unit": {
-        "title": "Find the unit-id",
-        "description": "This is the AB64 box's own Modbus address (set via its SW1+SW2 DIP switches) — separate from the gateway's TCP port you entered previously.",
-        "data": {
+          "port": "Gateway TCP port",
           "unit_id": "AB64 unit-id"
         },
         "data_description": {
-          "unit_id": "Leave blank to scan unit-ids 1-63 (address 0 is skipped — it's the Modbus broadcast address and never responds); this can take up to about a minute. Or enter a specific unit-id to verify it directly, including 0 — if your AB64 is set to address 0, change the DIP switch, since it will never respond on that address. Do not trust the DIP switch reading alone."
+          "name": "Sets this AC's entity IDs when they are first created — name it after the AC unit or room, not the gateway.",
+          "port": "The TCP port your gateway listens on for Modbus — 502 is the Modbus standard, but check your gateway's own configuration page (an Elfin EW11 defaults to 8899).",
+          "unit_id": "This is the AB64 box's own Modbus address, set via its SW1+SW2 DIP switches — not the gateway's TCP port above. Calculate it as unit-id = SW2 × 16 + SW1 + 1; the vendor's switch table is 1-based, so switches set to 0,0 mean address 1, not 0 — this off-by-one is the most common misread. Leave blank to scan every address from 1 to 64, which can take up to about a minute."
         }
       },
       "select_unit": {
-        "title": "Multiple units found",
-        "description": "More than one unit-id responded on this gateway. Choose the one for this AC unit.",
+        "title": "Confirm the AB64 unit-id",
+        "description": "One or more unit-ids responded on this gateway. If you're not sure which one is this AC, turn it on/off (or change its mode) with the remote and see which entry's state changes to match — the values shown are read live, not cached.",
         "data": {
           "unit_id": "Unit-id"
         }
@@ -47,7 +39,7 @@
     "error": {
       "cannot_connect": "Could not open a TCP connection to the gateway. Check host, port, and that the gateway is reachable on the network.",
       "read_timeout": "Connected to the gateway, but the AB64 did not respond on this unit-id. Check wiring, baud rate, and DIP switch address.",
-      "no_units_found": "No unit-id in the 1-63 range responded. Check wiring, baud rate, and that the gateway is bridged to the RS-485 bus.",
+      "no_units_found": "No unit-id in the 1-64 range responded. Check wiring, baud rate, and that the gateway is bridged to the RS-485 bus.",
       "all_units_already_configured": "Every unit-id that responded on this gateway is already set up as another entry. Nothing new to add here.",
       "already_configured": "This host, port, and unit-id combination is already configured."
     },
@@ -63,11 +55,14 @@
         "data": {
           "scan_interval": "Poll interval (seconds)",
           "enable_advanced_telemetry": "Enable advanced telemetry sensors"
+        },
+        "data_description": {
+          "scan_interval": "One read takes about 60-80 ms, so 1 AC alone at a 1-second interval uses roughly 8% of the RS-485 bus's time (around 20-25% with advanced telemetry enabled); 12 AB64 units sharing one gateway at 1 second each would use roughly 96% of it, effectively saturating the bus. Pick a value based on how many AB64 units share this gateway, not just this one entry."
         }
       }
     },
     "error": {
-      "scan_interval_too_low": "Poll interval must be at least 10 seconds — this bus may be shared with other AB64 units on the same gateway."
+      "scan_interval_too_low": "Poll interval must be at least 1 second — this bus may be shared with other AB64 units on the same gateway."
     }
   },
   "entity": {
