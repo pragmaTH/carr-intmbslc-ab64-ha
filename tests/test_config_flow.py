@@ -368,6 +368,42 @@ async def test_scan_to_select_unit_round_connects_only_once(hass, fake_clients):
     assert client.close_calls == 1
 
 
+async def test_connection_lost_mid_scan_becomes_cannot_connect_and_releases_hub(
+    hass, fake_clients
+):
+    """n-9 (review/unitstep-review.md, round 2): the `except ConnectionException:`
+    at config_flow.py:176 — the one wrapping everything after a successful
+    acquire (scan, and on the scan path, label-building) — had zero test
+    coverage; the reviewer proved this by deleting it locally and finding all
+    131 tests still passed. Without it, a connection dropped mid-scan
+    (_async_scan_units only catches (AB64ReadError, TimeoutError), never
+    ConnectionException — see its own docstring) would propagate straight out
+    of async_step_user unhandled: the exact "Unknown error after a ~64s scan"
+    symptom m-1 fixed for the label phase, resurfacing one layer up in the scan
+    phase instead.
+
+    Triggers a *real* ConnectionException via disconnect_after_n_reads=3 (the
+    reviewer's suggested value — added to conftest.py for the m-1 test pair,
+    reused here), not a fabricated one, partway through the scan. Asserts both
+    halves of correct behavior: the form shows cannot_connect (not a crash),
+    AND the hub acquired at the top of async_step_user is actually released —
+    this except sits in the same try/finally as the m-1 fix, so a regression
+    here would leak a refcount the same way the original m1 setup-entry bug did."""
+    client = seed_happy_path(fake_clients)
+    client.only_respond_to_known_units = True
+    client.disconnect_after_n_reads = 3
+
+    result = await _start_user_flow(hass)
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == "user"
+    assert result["errors"] == {"base": "cannot_connect"}
+
+    domain_data = hass.data.get(DOMAIN, {})
+    assert domain_data.get("hubs", {}) == {}, "hub must be released, not leaked"
+    assert client.close_calls == 1
+
+
 # --- Case 9: pre-unitstep entry shape still sets up, no migration -----------------
 
 

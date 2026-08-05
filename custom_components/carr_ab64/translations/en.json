@@ -13,7 +13,7 @@
         "data_description": {
           "name": "Sets this AC's entity IDs when they are first created — name it after the AC unit or room, not the gateway.",
           "port": "The TCP port your gateway listens on for Modbus — 502 is the Modbus standard, but check your gateway's own configuration page (an Elfin EW11 defaults to 8899).",
-          "unit_id": "This is the AB64 box's own Modbus address, set via its SW1+SW2 DIP switches — not the gateway's TCP port above. Calculate it as unit-id = SW2 × 16 + SW1 + 1; the vendor's switch table is 1-based, so switches set to 0,0 mean address 1, not 0 — this off-by-one is the most common misread. Leave blank to scan every address from 1 to 64, which can take up to about a minute."
+          "unit_id": "The AB64 box's own address on the gateway — unit-id = SW2 × 16 + SW1 + 1 (the vendor's switch table is 1-based, so switches at 0,0 mean 1, not 0). Leave blank to scan 1-64 instead, which takes up to about a minute."
         }
       },
       "select_unit": {

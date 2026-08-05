@@ -106,6 +106,34 @@ def test_port_data_description_still_warns_about_ew11_8899():
     assert "8899" in step["reconfigure"]["data_description"]["port"]
 
 
+def test_unit_id_data_description_still_has_the_sw1_sw2_formula():
+    """n-10 (review/unitstep-review.md round 2): unlike the port field (see
+    test_port_data_description_still_warns_about_ew11_8899 above), the unit_id
+    field's data_description had no test pinning its content at all. The
+    formula it carries — unit-id = SW2 × 16 + SW1 + 1 — is not a nicety: it's
+    the exact thing that cost the original bring-up session real time (the
+    vendor's own DIP table is 1-based, so reading the switches directly gives
+    an answer that's off by one), and it's not written down anywhere else the
+    user would see it while filling in this form — the manual's table is a
+    physical document, not something HA surfaces. Losing this string silently
+    would reintroduce that exact off-by-one trap for every future user with
+    only the switches in front of them.
+
+    Checks strings.json AND translations/en.json independently (rather than
+    relying on test_strings_json_equals_translations_en_json) so a future edit
+    that trims the formula from only one of the two files still fails here,
+    not just there. `×` must be the real multiplication sign (U+00D7), not an
+    ASCII "x" — a find/replace or manual retype is a plausible way this
+    formula could quietly degrade to something that still "looks right" at a
+    glance."""
+    for filename in ("strings.json", "translations/en.json"):
+        data = json.loads((INTEGRATION_DIR / filename).read_text())
+        text = data["config"]["step"]["user"]["data_description"]["unit_id"]
+        assert "SW2 × 16 + SW1 + 1" in text, f"{filename}: formula missing or × isn't U+00D7"
+        assert "1-64" in text, f"{filename}: address range missing"
+        assert "blank" in text, f"{filename}: blank-means-scan explanation missing"
+
+
 def test_port_selector_returns_int_not_float():
     result = PORT_SELECTOR(8899)
     assert result == 8899
