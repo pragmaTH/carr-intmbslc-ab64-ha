@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 import pytest
 from freezegun import freeze_time
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from homeassistant.util import dt as dt_util
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.carr_ab64.const import (
     AB_BUS_FAULT_DEBOUNCE_SECONDS,
@@ -25,6 +26,8 @@ from custom_components.carr_ab64.const import (
     CONF_UNIT_ID,
     DOMAIN,
     MAX_CONSECUTIVE_READ_FAILURES,
+    POST_WRITE_REFRESH_DELAY,
+    REG_SETPOINT,
     REG_SW_VERSION,
     UNSUPPORTED_BLOCK_FAILURES,
     UNSUPPORTED_BLOCK_RETRY_LADDER,
@@ -980,3 +983,216 @@ async def test_basic_block_three_strikes_unaffected_by_advanced_block_backoff_st
 
     state = hass.states.get("climate.living_room_ac")
     assert state.state == "unavailable"
+
+
+# --- post-write refresh (0.1.7): AB64 takes ~1.7s to reflect a written value, ----
+# so the immediate post-write refresh always reads back the pre-write value; a
+# single follow-up refresh is scheduled POST_WRITE_REFRESH_DELAY later to pick up
+# the settled value without waiting for the next regular poll. --------------------
+
+
+def _count_basic_block_reads(client, since_index: int = 0) -> int:
+    """Count refreshes (not raw read frames) by counting reads at
+    BASIC_BLOCK_START specifically — every AB64Coordinator refresh reads that
+    address exactly once regardless of how many advanced blocks it also reads,
+    so this is a stable proxy for "how many refreshes happened" independent of
+    the CONF_ENABLE_ADVANCED state."""
+    return sum(
+        1 for (_, addr, _) in client.read_log[since_index:] if addr == BASIC_BLOCK_START
+    )
+
+
+async def test_write_triggers_immediate_refresh_then_one_more_after_delay(
+    hass, fake_clients
+):
+    """Item 1: a single write must produce exactly one immediate refresh (the
+    existing pre-0.1.7 behavior) and exactly one more refresh
+    POST_WRITE_REFRESH_DELAY later — not zero (the whole point of this
+    feature), not more than one (see the burst test below)."""
+    with freeze_time("2026-01-01 00:00:00") as frozen:
+        client = seed_happy_path(fake_clients)
+        entry = _make_entry()
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+
+        read_log_before = len(client.read_log)
+        await coordinator.async_write(REG_SETPOINT, 24)
+        await hass.async_block_till_done()
+        assert _count_basic_block_reads(client, read_log_before) == 1, (
+            "immediate refresh must happen right away"
+        )
+
+        frozen.tick(timedelta(seconds=POST_WRITE_REFRESH_DELAY))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert _count_basic_block_reads(client, read_log_before) == 2, (
+            "exactly one follow-up refresh must fire at +POST_WRITE_REFRESH_DELAY"
+        )
+
+
+async def test_burst_of_writes_collapses_to_one_follow_up_refresh(hass, fake_clients):
+    """Item 2 (🔴): 10 rapid writes (dragging a temperature slider) must leave
+    exactly ONE pending follow-up, not 10 — this is the post-write-refresh
+    analog of the original core-review finding M3 (rounds `core`/`core-fix`):
+    that bug was N rapid setpoint writes each producing their own independent
+    refresh with no coalescing, discovered via the same "drag the slider"
+    scenario. The fix there was serializing through the hub lock with
+    async_refresh() having zero cooldown; the fix here is
+    _async_schedule_post_write_refresh() cancelling any previously-pending
+    follow-up before scheduling a new one (see its docstring in
+    coordinator.py) — a different mechanism guarding against the same class of
+    "N user actions -> N-times the bus traffic" bug, so it needs its own
+    regression guard rather than assuming M3's fix covers it."""
+    with freeze_time("2026-01-01 00:00:00") as frozen:
+        client = seed_happy_path(fake_clients)
+        entry = _make_entry()
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+
+        read_log_before = len(client.read_log)
+        for temp in range(18, 28):  # 10 rapid writes
+            await coordinator.async_write(REG_SETPOINT, temp)
+        await hass.async_block_till_done()
+        assert _count_basic_block_reads(client, read_log_before) == 10, (
+            "each write still gets its own immediate refresh — only the "
+            "follow-up is meant to coalesce"
+        )
+
+        after_immediate = len(client.read_log)
+        frozen.tick(timedelta(seconds=POST_WRITE_REFRESH_DELAY))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        followup_reads = _count_basic_block_reads(client, after_immediate)
+        assert followup_reads == 1, f"expected exactly 1 follow-up refresh, got {followup_reads}"
+
+
+async def test_pending_follow_up_cancelled_on_unload_no_error(hass, fake_clients, caplog):
+    """Item 3 (🔴): unloading the entry while a follow-up is still pending must
+    cancel it — a follow-up that fires after unload would call async_refresh()
+    on a coordinator whose entry/hub is already torn down. Ticks time past the
+    delay AFTER unload and asserts both that no extra read happened and that
+    nothing logged an ERROR (a crash inside the async_call_later callback
+    would otherwise be silently swallowed by HA's event loop and only show up
+    as a log entry, not a raised exception this test could catch directly)."""
+    with freeze_time("2026-01-01 00:00:00") as frozen:
+        client = seed_happy_path(fake_clients)
+        entry = _make_entry()
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+
+        await coordinator.async_write(REG_SETPOINT, 24)
+        await hass.async_block_till_done()
+        assert coordinator._post_write_refresh_unsub is not None, (
+            "sanity: a follow-up really is pending before unload"
+        )
+
+        read_log_before = len(client.read_log)
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+
+        # The direct, unambiguous check: cancellation must have actually run.
+        # Read-count/no-ERROR checks alone are NOT enough here — verified while
+        # writing this test, not assumed: async_release_hub() (called during
+        # unload) closes the shared hub's client, so even an UNCANCELLED
+        # follow-up that fires later hits AB64Hub.async_read_holding's "not
+        # connected" check and raises ConnectionException — which
+        # _async_update_data's own MAX_CONSECUTIVE_READ_FAILURES tolerance (see
+        # the workstream-C tests above) then silently absorbs (self.data isn't
+        # None yet, so it just returns the last-known data instead of raising),
+        # producing neither a new read_log entry nor an ERROR log either way.
+        # That resilience layer would otherwise mask exactly the bug this test
+        # exists to catch.
+        assert coordinator._post_write_refresh_unsub is None, (
+            "the pending follow-up must be cancelled synchronously during unload"
+        )
+
+        frozen.tick(timedelta(seconds=POST_WRITE_REFRESH_DELAY + 1))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+        assert len(client.read_log) == read_log_before, (
+            "no refresh should happen after unload"
+        )
+        assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
+@pytest.mark.parametrize("scan_interval", [1, 2])
+async def test_no_follow_up_scheduled_when_scan_interval_leq_delay(
+    hass, fake_clients, scan_interval
+):
+    """Item 4: when update_interval <= POST_WRITE_REFRESH_DELAY, the regular
+    poll already lands at or before that point, so scheduling a follow-up
+    would just be a redundant extra read — checked at both boundary values (1
+    and the boundary itself, 2). Asserted via the coordinator's own
+    _post_write_refresh_unsub staying None immediately after the write, not by
+    counting reads at t+2s: at scan_interval<=2 the coordinator's own regular
+    poll ALSO lands at that exact instant (same timer mechanism,
+    async_fire_time_changed fires both), so a read-count check there can't
+    distinguish "no follow-up was ever scheduled" from "a follow-up fired at
+    the same moment as a coincidental regular poll" — checking the internal
+    unsub handle is the only way to test this unambiguously."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry(options={CONF_SCAN_INTERVAL: scan_interval})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+
+    await coordinator.async_write(REG_SETPOINT, 24)
+    await hass.async_block_till_done()
+
+    assert coordinator._post_write_refresh_unsub is None, (
+        f"no follow-up should be scheduled when scan_interval={scan_interval} "
+        f"<= POST_WRITE_REFRESH_DELAY"
+    )
+
+
+async def test_no_optimistic_state_value_changes_only_on_settled_follow_up_read(
+    hass, fake_clients
+):
+    """Item 5 (🔴): proves the mechanism AND the no-optimistic-state prohibition
+    in one test. The fake client's write_register() is made to ACK the write
+    (matching a real Modbus write confirmation) without actually updating its
+    stored register — modeling the AB64's measured lag between accepting a
+    write and its own register mirror reflecting it. So: immediate refresh
+    must still show the OLD value (22) — proving coordinator.data is never
+    set from the value just written, only from a real read — and only the
+    follow-up refresh, after the fake "settles" to the new value, may show 24.
+    A regression that set coordinator.data optimistically from the written
+    value would make the FIRST assertion below fail; this is deliberately
+    checked separately from whether the mechanism eventually gets the right
+    value at all."""
+    with freeze_time("2026-01-01 00:00:00") as frozen:
+        client = seed_happy_path(fake_clients)  # set_temp starts at 22
+        client.suppress_write_persist(TEST_UNIT_ID, REG_SETPOINT)
+        entry = _make_entry()
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+        assert coordinator.data["set_temp"] == 22
+
+        await coordinator.async_write(REG_SETPOINT, 24)
+        await hass.async_block_till_done()
+        assert coordinator.data["set_temp"] == 22, (
+            "immediate refresh reads the not-yet-settled register — must NOT "
+            "be set optimistically from the value just written"
+        )
+        state = hass.states.get("climate.living_room_ac")
+        assert state.attributes["temperature"] == 22
+
+        # Hardware "catches up" for real before the follow-up read.
+        client.set_registers(TEST_UNIT_ID, REG_SETPOINT, [24])
+        frozen.tick(timedelta(seconds=POST_WRITE_REFRESH_DELAY))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+        assert coordinator.data["set_temp"] == 24
+        state = hass.states.get("climate.living_room_ac")
+        assert state.attributes["temperature"] == 24

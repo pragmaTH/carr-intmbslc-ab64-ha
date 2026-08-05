@@ -159,6 +159,18 @@ UNSUPPORTED_BLOCK_FAILURES = 3
 # zero. Indexed by a per-block retry step counter (see AB64Coordinator._block_retry_step)
 # that only advances on failure and resets to 0 on any success.
 UNSUPPORTED_BLOCK_RETRY_LADDER = (60, 300, 600)
+
+# Post-write follow-up refresh (2026-08-05): measured on real hardware that a
+# command takes ~1.7s to be reflected back in the AB64's registers (setpoint 1.71s;
+# mode 1.76s / 1.65s — three consistent measurements at a 1s poll interval), so the
+# immediate async_refresh() right after a write (see AB64Coordinator.async_write)
+# always reads back the pre-write value. Without a follow-up, the next read that
+# could show the settled value is whatever the regular poll interval leaves the user
+# waiting for — up to the full DEFAULT_SCAN_INTERVAL (30s) even though the hardware
+# was ready after about 1 second. This schedules exactly one extra read this far
+# after a write, once, to close that gap — see async_write for why it's still a real
+# read and not optimistic state.
+POST_WRITE_REFRESH_DELAY = 2
 # Full DIP address space, 64 values starting at 1 (not 0): the vendor's SW1+SW2
 # table is 1-based (unit-id = SW2 * 16 + SW1 + 1 — confirmed against the table's own
 # worked examples, e.g. SW2=0,SW1=0 -> 1 and SW2=3,SW1=15 -> 64). This corrects

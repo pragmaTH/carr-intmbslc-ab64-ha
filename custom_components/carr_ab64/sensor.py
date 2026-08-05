@@ -1,4 +1,5 @@
-"""Sensor platform for carr_ab64: error_code (always) + advanced telemetry (opt-in)."""
+"""Sensor platform for carr_ab64: error_code and indoor_temp (always) + the other 11
+advanced telemetry fields (opt-in)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,6 +32,15 @@ class AdvancedSensorMeta:
 
 
 ADV_SENSOR_META: dict[str, AdvancedSensorMeta] = {
+    # indoor_temp (TA, register 4012) is the one advanced field created regardless of
+    # CONF_ENABLE_ADVANCED (see async_setup_entry below) — every AC needs a
+    # return-air thermistor to run its own control loop, so this is the one register
+    # in the advanced group we're confident exists on every model/firmware, unlike
+    # the other 11, which stay opt-in because we don't know that yet. It's also
+    # already read every poll unconditionally by AB64Coordinator for
+    # climate.current_temperature, so making this entity default-on adds zero extra
+    # bus cost — the other 11 fields would each cost real read time if defaulted on
+    # the same way.
     "indoor_temp": AdvancedSensorMeta(
         SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT
     ),
@@ -86,11 +96,21 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: AB64Coordinator = entry.runtime_data
-    entities: list[SensorEntity] = [AB64ErrorCodeSensor(coordinator)]
+    entities: list[SensorEntity] = [
+        AB64ErrorCodeSensor(coordinator),
+        # See the comment on ADV_SENSOR_META["indoor_temp"] above for why this one
+        # advanced field is unconditional. unique_id is field_key-driven either way
+        # (see AB64AdvancedSensor.__init__), so creating it here rather than via the
+        # opt-in loop below does not change it for anyone already using this entity.
+        AB64AdvancedSensor(coordinator, "indoor_temp", ADV_SENSOR_META["indoor_temp"]),
+    ]
     if entry.options.get(CONF_ENABLE_ADVANCED, False):
         entities.extend(
             AB64AdvancedSensor(coordinator, key, ADV_SENSOR_META[key])
             for key in ADVANCED_FIELD_KEYS
+            # indoor_temp was already added above, unconditionally — skip it here so
+            # enabling the option doesn't create a second entity for the same field.
+            if key != "indoor_temp"
         )
     async_add_entities(entities)
 
@@ -129,7 +149,9 @@ class AB64ErrorCodeSensor(AB64Entity, SensorEntity):
 
 
 class AB64AdvancedSensor(AB64Entity, SensorEntity):
-    """One advanced telemetry field (indoor/outdoor). Only created when opted in."""
+    """One advanced telemetry field (indoor/outdoor). Created when opted in via
+    CONF_ENABLE_ADVANCED — except indoor_temp, which is always created (see
+    async_setup_entry and the comment on ADV_SENSOR_META["indoor_temp"])."""
 
     def __init__(self, coordinator: AB64Coordinator, field_key: str, meta: AdvancedSensorMeta) -> None:
         super().__init__(coordinator)

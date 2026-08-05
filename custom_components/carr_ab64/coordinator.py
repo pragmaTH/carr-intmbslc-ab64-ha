@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 from pymodbus.exceptions import ConnectionException
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -31,6 +32,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_CONSECUTIVE_READ_FAILURES,
+    POST_WRITE_REFRESH_DELAY,
     REG_ERROR,
     REG_FAN,
     REG_MODE,
@@ -90,6 +92,10 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
         # advances by 1 each time a retry-after-cooldown attempt fails (clamped to the
         # ladder's last rung), resets to 0 on any success.
         self._block_retry_step: dict[str, int] = {"indoor": 0, "outdoor": 0}
+        # Handle for the single pending post-write follow-up refresh, if any — see
+        # async_write/_async_schedule_post_write_refresh. Never more than one at a
+        # time: scheduling a new one cancels whatever this currently holds first.
+        self._post_write_refresh_unsub: CALLBACK_TYPE | None = None
 
     @property
     def advanced_enabled(self) -> bool:
@@ -260,6 +266,18 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
         write, waiting up to 10s for the UI to reflect it reads as "command didn't
         take" and invites a repeat write, which just adds more traffic to a bus that
         may already be shared with other AB64 units.
+
+        That immediate refresh reads back the pre-write value every time (measured
+        on real hardware: the AB64 takes ~1.7s to reflect a written value in its
+        registers — see POST_WRITE_REFRESH_DELAY in const.py), so a single follow-up
+        refresh is also scheduled a couple seconds out to pick up the settled value
+        without making the user wait for the next regular poll. This is NOT
+        optimistic state: both refreshes are real reads through the same
+        _async_update_data path as every other poll — nothing here ever writes the
+        value just sent into coordinator.data directly. The user has locked this as
+        a hard requirement (values must always come from what the hardware actually
+        reports), so don't "simplify" this by setting the field from `value` instead
+        of scheduling a real read.
         """
         try:
             await self.hub.async_write_register(self.unit_id, address, value)
@@ -267,3 +285,45 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
             raise HomeAssistantError(str(err)) from err
         if refresh:
             await self.async_refresh()
+            self._async_schedule_post_write_refresh()
+
+    @callback
+    def _async_schedule_post_write_refresh(self) -> None:
+        """Schedule exactly one follow-up read POST_WRITE_REFRESH_DELAY after a write.
+
+        No-op when update_interval is already <= POST_WRITE_REFRESH_DELAY: the next
+        regular poll will already catch the settled value at that point, so scheduling
+        one here would just be an extra read on top of the regular poll — and the
+        users running an interval that short are already the ones most exposed to bus
+        load (see MIN_SCAN_INTERVAL/the options data_description bus-time warning),
+        the last group that should be paying for a redundant read.
+
+        Rapid repeated writes (e.g. dragging a temperature slider) must not stack N
+        pending follow-ups for N writes — any previous pending one is cancelled
+        before a new one is scheduled, so there's ever at most one in flight.
+        """
+        if self.update_interval is not None and (
+            self.update_interval.total_seconds() <= POST_WRITE_REFRESH_DELAY
+        ):
+            return
+        if self._post_write_refresh_unsub is not None:
+            self._post_write_refresh_unsub()
+        self._post_write_refresh_unsub = async_call_later(
+            self.hass, POST_WRITE_REFRESH_DELAY, self._async_post_write_refresh
+        )
+
+    async def _async_post_write_refresh(self, _now: datetime) -> None:
+        self._post_write_refresh_unsub = None
+        await self.async_refresh()
+
+    @callback
+    def async_cancel_pending_post_write_refresh(self) -> None:
+        """Cancel a pending post-write follow-up, if any — call on entry unload.
+
+        Without this, a follow-up scheduled just before the user removes/reloads the
+        entry would still fire afterwards and call async_refresh() on a coordinator
+        whose entry is already torn down.
+        """
+        if self._post_write_refresh_unsub is not None:
+            self._post_write_refresh_unsub()
+            self._post_write_refresh_unsub = None

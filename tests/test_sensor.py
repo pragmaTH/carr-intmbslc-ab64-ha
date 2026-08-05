@@ -9,6 +9,7 @@ from custom_components.carr_ab64.const import (
     AB_BUS_ERROR_VALUE,
     ADV_OUTDOOR_START,
     CONF_ENABLE_ADVANCED,
+    CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
     DOMAIN,
     ERROR_CODES,
@@ -101,16 +102,29 @@ def test_filter_sign_timer_has_no_state_class():
 # --- telemetry topic (2026-08-05): group A case 2 — reading != creating an entity
 
 
-async def test_no_advanced_sensor_entities_created_when_disabled_even_though_indoor_is_read(
+async def test_indoor_temp_sensor_exists_but_other_11_dont_when_advanced_disabled(
     hass, fake_clients
 ):
-    """Item 2: "reading a register" and "creating an entity for it" are two
-    separate things — this test is what stops a future refactor from quietly
-    merging them (e.g. "we're already reading indoor_temp, might as well always
-    show the sensor too"). With CONF_ENABLE_ADVANCED off: (a) the indoor block
-    IS being read — coordinator.data proves it has a real value — but (b) not
-    one of the 12 advanced sensor entities (indoor or outdoor) exists in the
-    entity registry, checked by unique_id rather than guessing entity_id slugs."""
+    """Item 1 (`roomtemp` topic, 2026-08-05) — rewritten contract, not deleted:
+    this test's ORIGINAL intent (telemetry topic, "reading a register" and
+    "creating an entity for it" are two separate things — no advanced sensor
+    should leak out while the option is off) is still fully in force for the
+    other 11 fields, checked exactly as before by unique_id. What changed is
+    that indoor_temp (TA) is now a deliberate, single exception: sensor.py
+    creates it unconditionally (see ADV_SENSOR_META["indoor_temp"]'s comment)
+    because (a) a return-air thermistor is something every AC needs for its
+    own control loop, so TA is the one advanced register we're confident
+    exists on every model/firmware — unlike the other 11, which stay opt-in
+    specifically because we don't know that yet — and (b) AB64Coordinator
+    already reads it every poll unconditionally for climate.
+    current_temperature regardless of this entity existing, so creating the
+    entity costs zero extra bus traffic — unlike the other 11, which would
+    each add a real read if defaulted on the same way.
+
+    Checks all 12 unique_ids explicitly (indoor_temp present, the other 11
+    absent) rather than a blanket "nothing exists" or "something exists"
+    assertion, so this one test proves both halves of the new contract at
+    once and can't be satisfied by a mutation that gets either half wrong."""
     client = seed_happy_path(fake_clients)
     client.set_registers(TEST_UNIT_ID, 4012, [24, 0, 0, 0, 0, 0, 0, 0, 0])
     entry = await _setup(hass, fake_clients, options={CONF_ENABLE_ADVANCED: False})
@@ -120,11 +134,162 @@ async def test_no_advanced_sensor_entities_created_when_disabled_even_though_ind
     )
 
     registry = er.async_get(hass)
+    indoor_temp_entity_id = registry.async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.entry_id}_indoor_temp"
+    )
+    assert indoor_temp_entity_id is not None, (
+        "indoor_temp must exist even while advanced telemetry is disabled"
+    )
+    assert hass.states.get(indoor_temp_entity_id).state == "24"
+
     for field_key in ADV_SENSOR_META:
+        if field_key == "indoor_temp":
+            continue
         unique_id = f"{entry.entry_id}_{field_key}"
         assert registry.async_get_entity_id("sensor", DOMAIN, unique_id) is None, (
             f"{field_key}: no sensor entity should exist while advanced is disabled"
         )
+
+
+async def test_advanced_enabled_creates_exactly_12_sensors_indoor_temp_not_duplicated(
+    hass, fake_clients, caplog
+):
+    """Item 2 (🔴): with CONF_ENABLE_ADVANCED on, the always-created indoor_temp
+    entity and the opt-in loop over ADVANCED_FIELD_KEYS must combine into
+    exactly 12 sensor entities — 13 (one duplicate indoor_temp) is the failure
+    mode this guards against, e.g. if the opt-in loop's `if key !=
+    "indoor_temp"` skip (sensor.py's async_setup_entry) were ever dropped.
+
+    The registry-count/unique_id-set checks below turn out NOT to be enough on
+    their own — verified while writing this test, not assumed: when
+    async_add_entities() actually receives two AB64AdvancedSensor objects with
+    the same unique_id, HA's own entity_platform silently drops the second one
+    (logs an ERROR, "does not generate unique IDs ... already exists —
+    ignoring", but doesn't raise), so the registry ends up with exactly one
+    indoor_temp entry either way and a pure count/uniqueness check can't tell
+    the two code paths apart. The caplog assertion below is what actually
+    catches the duplicate-construction bug — mutation-checked in
+    done/qa-roomtemp.md dropping the skip and confirming this specific
+    assertion (not the count) is what fails."""
+    entry = await _setup(hass, fake_clients, options={CONF_ENABLE_ADVANCED: True})
+
+    registry = er.async_get(hass)
+    advanced_entities = [
+        e
+        for e in registry.entities.values()
+        if e.domain == "sensor" and "error_code" not in e.unique_id
+    ]
+    assert len(advanced_entities) == 12
+
+    unique_ids = [e.unique_id for e in advanced_entities]
+    assert len(unique_ids) == len(set(unique_ids)), "duplicate unique_id detected"
+
+    indoor_temp_ids = [u for u in unique_ids if u == f"{entry.entry_id}_indoor_temp"]
+    assert len(indoor_temp_ids) == 1
+
+    duplicate_warnings = [
+        r
+        for r in caplog.records
+        if r.levelname == "ERROR" and "already exists" in r.message and "indoor_temp" in r.message
+    ]
+    assert duplicate_warnings == [], (
+        "two AB64AdvancedSensor(..., 'indoor_temp', ...) objects were constructed "
+        "and handed to async_add_entities — HA silently dropped the extra one, "
+        "but it should never have been created in the first place"
+    )
+
+
+def test_indoor_temp_unique_id_format_is_pinned():
+    """Item 3: indoor_temp's unique_id must stay exactly
+    f"{entry_id}_indoor_temp" — the same format it already had back when it
+    was only created via the opt-in loop (telemetry topic). This isn't a
+    style preference: HA identifies an entity across restarts/reloads by
+    unique_id, not by entity_id or field name. If this ever changed (e.g. to
+    disambiguate the always-on vs opt-in code paths with a different key), a
+    user who already has this entity would silently get a brand-new entity
+    instead — losing history/statistics on the old one and possibly ending up
+    with two indoor-temperature entities on their dashboard until they notice
+    and clean up the orphan by hand. Sibling of test_advanced_sensors_have_
+    correct_enabled_default_split above, which already proves every
+    ADV_SENSOR_META key (including indoor_temp) round-trips through this same
+    f"{entry_id}_{field_key}" pattern end-to-end; this test pins the exact
+    string shape independent of any entry_id, so a change here fails even if
+    that broader round-trip test's entry_id happened to still line up."""
+    from custom_components.carr_ab64.sensor import AB64AdvancedSensor
+
+    class _FakeEntry:
+        entry_id = "abc123"
+        title = "Fake AC"
+
+    class _FakeCoordinator:
+        entry = _FakeEntry()
+        sw_version = None
+
+    sensor = AB64AdvancedSensor(_FakeCoordinator(), "indoor_temp", ADV_SENSOR_META["indoor_temp"])
+    assert sensor.unique_id == "abc123_indoor_temp"
+
+
+async def test_indoor_temp_survives_toggling_advanced_option_twice(hass, fake_clients):
+    """Item 4: off -> on -> off (2 reloads via the options update listener) must
+    leave indoor_temp as the SAME entity throughout — not removed and
+    recreated, which would show up as the entity's `id` (registry-internal,
+    stable across reloads for the same unique_id) changing, or transiently as
+    zero indoor_temp entities existing at any point in the sequence."""
+    entry = await _setup(hass, fake_clients, options={CONF_ENABLE_ADVANCED: False})
+    registry = er.async_get(hass)
+    unique_id = f"{entry.entry_id}_indoor_temp"
+
+    initial = registry.async_get(
+        registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+    )
+    assert initial is not None
+
+    for enable in (True, False):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_SCAN_INTERVAL: 30, CONF_ENABLE_ADVANCED: enable}
+        )
+        await hass.async_block_till_done()
+
+        entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        assert entity_id is not None, f"indoor_temp missing after toggling to {enable}"
+        current = registry.async_get(entity_id)
+        assert current.id == initial.id, (
+            f"indoor_temp got recreated (different registry entry) after toggling to {enable}"
+        )
+
+
+async def test_climate_current_temperature_unaffected_by_indoor_temp_sensor_advanced_off(
+    hass, fake_clients
+):
+    """Item 5 (advanced off): climate.current_temperature reads coordinator.data
+    directly (see climate.py) and must keep working identically regardless of
+    whether the indoor_temp SENSOR entity exists — the two are independent
+    consumers of the same coordinator field. Split into two tests (this one
+    and the _advanced_on sibling below) rather than one test looping both
+    states on the same hass instance, since a second MockConfigEntry with the
+    same unique_id/title would collide with the first entry's already-claimed
+    climate.living_room_ac entity_id and stop testing what it claims to."""
+    client = seed_happy_path(fake_clients)
+    client.set_registers(TEST_UNIT_ID, 4012, [24, 0, 0, 0, 0, 0, 0, 0, 0])
+    await _setup(hass, fake_clients, options={CONF_ENABLE_ADVANCED: False})
+
+    state = hass.states.get("climate.living_room_ac")
+    assert state.attributes.get("current_temperature") == 24
+
+
+async def test_climate_current_temperature_unaffected_by_indoor_temp_sensor_advanced_on(
+    hass, fake_clients
+):
+    """Item 5 (advanced on): sibling of the test above — same guarantee must
+    hold with the option enabled and the indoor_temp sensor entity actually
+    present."""
+    client = seed_happy_path(fake_clients)
+    client.set_registers(TEST_UNIT_ID, 4012, [24, 0, 0, 0, 0, 0, 0, 0, 0])
+    await _setup(hass, fake_clients, options={CONF_ENABLE_ADVANCED: True})
+
+    state = hass.states.get("climate.living_room_ac")
+    assert state.attributes.get("current_temperature") == 24
 
 
 # --- telemetry topic (2026-08-05): group C — unit regression guards -------------

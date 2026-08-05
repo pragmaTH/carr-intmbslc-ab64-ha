@@ -57,6 +57,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    # Cancels a pending post-write follow-up refresh (see AB64Coordinator.async_write)
+    # so it can't fire after this entry is torn down.
+    entry.async_on_unload(coordinator.async_cancel_pending_post_write_refresh)
     return True
 
 

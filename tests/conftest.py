@@ -89,6 +89,7 @@ class FakeModbusClient:
         # *next* call — not a fabricated one. None (default) never disconnects.
         self.disconnect_after_n_reads: int | None = None
         self._read_count = 0
+        self.suppress_write_persist_addresses: dict[int, set[int]] = {}
 
     def set_registers(self, unit_id: int, start: int, values: list[int]) -> None:
         self.known_units.add(unit_id)
@@ -173,10 +174,21 @@ class FakeModbusClient:
         if address in self.error_response_write_addresses.get(slave, set()):
             self.op_log.append(f"write_end:{slave}:{address}")
             return SimpleNamespace(isError=lambda: True)
-        regs = self.registers.setdefault(slave, {})
-        regs[address] = value
+        if address not in self.suppress_write_persist_addresses.get(slave, set()):
+            regs = self.registers.setdefault(slave, {})
+            regs[address] = value
         self.op_log.append(f"write_end:{slave}:{address}")
         return SimpleNamespace(isError=lambda: False)
+
+    def suppress_write_persist(self, unit_id: int, *addresses: int) -> None:
+        """Make write_register() succeed (ack, no exception — matching a real
+        Modbus write confirmation) WITHOUT actually updating the stored register
+        value, modeling the AB64's real measured ~1s+ lag between accepting a
+        write and its own register mirror reflecting it. A test that wants to
+        simulate "the follow-up read catches the settled value" should call this,
+        then later call set_registers() for the same address to apply the value
+        the hardware would have settled on by then."""
+        self.suppress_write_persist_addresses.setdefault(unit_id, set()).update(addresses)
 
     async def read_input_registers(self, *args: Any, **kwargs: Any):
         # FC04 is not supported by the real AB64 — this fake deliberately has no

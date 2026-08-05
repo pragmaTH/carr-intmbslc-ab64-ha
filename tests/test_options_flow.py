@@ -75,16 +75,26 @@ async def test_scan_interval_below_minimum_is_validation_error_not_clamped(hass,
 async def test_advanced_telemetry_off_by_default_creates_no_advanced_entities(
     hass, fake_clients
 ):
-    """Case 23 (part 1): opt-in default False -> zero advanced sensor entities."""
+    """Case 23 (part 1), updated for the `roomtemp` topic (2026-08-05): opt-in
+    default False now creates exactly ONE advanced-group sensor entity —
+    indoor_temp, which sensor.py creates unconditionally regardless of
+    CONF_ENABLE_ADVANCED (see ADV_SENSOR_META["indoor_temp"]'s comment in
+    sensor.py) — not zero. The other 11 fields must still be absent; the
+    dedicated indoor_temp-vs-the-other-11 breakdown (unique_id-based, not this
+    unique_id-substring filter) lives in test_sensor.py's
+    test_indoor_temp_sensor_exists_but_other_11_dont_when_advanced_disabled."""
     await _setup_entry(hass, fake_clients)
 
     from homeassistant.helpers import entity_registry as er
 
     registry = er.async_get(hass)
     advanced_entities = [
-        e for e in registry.entities.values() if e.domain == "sensor" and "error_code" not in e.unique_id
+        e
+        for e in registry.entities.values()
+        if e.domain == "sensor" and "error_code" not in e.unique_id
     ]
-    assert advanced_entities == []
+    assert len(advanced_entities) == 1
+    assert advanced_entities[0].unique_id.endswith("_indoor_temp")
 
 
 async def test_enabling_advanced_telemetry_and_reload_creates_all_entities(hass, fake_clients):
