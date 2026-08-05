@@ -71,6 +71,17 @@ ADV_TEMPERATURE_FIELDS: frozenset[str] = frozenset(
 # Sentinel for "no value" on advanced registers — same 0xFFFF pattern as register 11.
 ADV_NO_VALUE = 0xFFFF
 
+# HA's own const module only defines REVOLUTIONS_PER_MINUTE, not a per-second variant,
+# so this one is ours. Needed for compressor_rpm specifically: a real ramp test
+# (idle -> high load) measured 23-58 on that register while the discharge pipe (TD)
+# read ~80°C the whole time — at that heat output the compressor cannot be turning at
+# 23-58 RPM (that would mean it's nearly stopped), so the raw value has to be
+# revolutions per *second*, not per minute. compressor_current is presented as a raw
+# unscaled number instead (see ADV_SENSOR_META in sensor.py) rather than getting a
+# similar unit guess, since current has no equivalent physical tell to confirm a scale
+# factor against.
+REVOLUTIONS_PER_SECOND = "rps"
+
 # --- Value maps (register 0-3) ---
 MODE_AUTO = 0
 MODE_HEAT = 1
@@ -121,6 +132,33 @@ MIN_SCAN_INTERVAL = 1
 # MIN_SCAN_INTERVAL = 1 usable: without this, one missed frame at a 1s interval would
 # make every entity flicker unavailable far more often than at the old 10s floor.
 MAX_CONSECUTIVE_READ_FAILURES = 3
+
+# Per-advanced-block backoff (2026-08-05): the indoor advanced block (4012+) is now
+# read on every poll regardless of the advanced-telemetry option, to give
+# climate.current_temperature a value from first install. That turns a register that
+# doesn't exist on some AC model/firmware from an opt-in risk the user chose into a
+# default-on one everyone is exposed to — and a register that simply never responds
+# (as opposed to answering with a Modbus exception or the 0xFFFF sentinel, both of
+# which degrade instantly) costs a full read timeout every single poll, forever. At
+# MIN_SCAN_INTERVAL = 1s that's not a degraded feature, it's a broken integration.
+# UNSUPPORTED_BLOCK_FAILURES bounds that cost: after this many consecutive failures on
+# one advanced block, stop reading it and wait before trying again — separate from
+# MAX_CONSECUTIVE_READ_FAILURES above, which is a basic-block-only, UpdateFailed-only
+# mechanism and must not be affected by this.
+UNSUPPORTED_BLOCK_FAILURES = 3
+# Ladder, not a flat delay (decision reversed 2026-08-05, replacing a flat 600s): at
+# MIN_SCAN_INTERVAL = 1s, a block trips (hits UNSUPPORTED_BLOCK_FAILURES) after only
+# 3-18 seconds of real elapsed time depending on whether failures are timeouts or fast
+# error responses. A flat 600s pause is the wrong punishment for the far more common
+# case — a transient RS-485 hiccup — since the hardware may already be answering again
+# 20 seconds later, but current_temperature would still be gone from the card for the
+# next 10 minutes. Climbing 60s -> 300s -> 600s recovers fast from a brief stumble
+# while a block that's genuinely unsupported by this AC model/firmware still lands on
+# the same 600s ceiling as before (no extra bus cost in the case the flat delay was
+# originally sized for) — it just takes two failed retries to get there instead of
+# zero. Indexed by a per-block retry step counter (see AB64Coordinator._block_retry_step)
+# that only advances on failure and resets to 0 on any success.
+UNSUPPORTED_BLOCK_RETRY_LADDER = (60, 300, 600)
 # Full DIP address space, 64 values starting at 1 (not 0): the vendor's SW1+SW2
 # table is 1-based (unit-id = SW2 * 16 + SW1 + 1 — confirmed against the table's own
 # worked examples, e.g. SW2=0,SW1=0 -> 1 and SW2=3,SW1=15 -> 64). This corrects

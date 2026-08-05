@@ -6,7 +6,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import REVOLUTIONS_PER_MINUTE, UnitOfElectricCurrent, UnitOfTemperature
+from homeassistant.const import REVOLUTIONS_PER_MINUTE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -16,6 +16,7 @@ from .const import (
     ADV_OUTDOOR_FIELDS,
     CONF_ENABLE_ADVANCED,
     ERROR_CODES,
+    REVOLUTIONS_PER_SECOND,
 )
 from .coordinator import AB64Coordinator
 from .entity import AB64Entity
@@ -57,14 +58,21 @@ ADV_SENSOR_META: dict[str, AdvancedSensorMeta] = {
     "outdoor_suction_temp_ts": AdvancedSensorMeta(
         SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT
     ),
+    # No device_class/unit: a real ramp test (idle -> high load) measured this
+    # register at 29-65 while TD (discharge pipe) stayed near 80°C the whole time.
+    # 29-65 A on a 3-phase compressor at that heat output would mean 17-38 kW of
+    # input power from an ~11 kW-rated unit, which doesn't add up — the scale is
+    # wrong, but with data from only one unit there's no way to derive the right
+    # divisor, and guessing one (e.g. /10) would be an unverifiable assumption baked
+    # into every user's card. Presented as a raw number instead so state_class
+    # trend/statistics still work without implying a specific unit that's likely
+    # wrong. See REVOLUTIONS_PER_SECOND in const.py for why compressor_rpm gets a
+    # unit fix but this one doesn't.
     "compressor_current": AdvancedSensorMeta(
-        SensorDeviceClass.CURRENT,
-        UnitOfElectricCurrent.AMPERE,
-        SensorStateClass.MEASUREMENT,
-        enabled_default=False,
+        None, None, SensorStateClass.MEASUREMENT, enabled_default=False
     ),
     "compressor_rpm": AdvancedSensorMeta(
-        None, REVOLUTIONS_PER_MINUTE, SensorStateClass.MEASUREMENT, enabled_default=False
+        None, REVOLUTIONS_PER_SECOND, SensorStateClass.MEASUREMENT, enabled_default=False
     ),
     "lowest_fan_rpm": AdvancedSensorMeta(
         None, REVOLUTIONS_PER_MINUTE, SensorStateClass.MEASUREMENT, enabled_default=False

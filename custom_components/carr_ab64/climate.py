@@ -138,7 +138,12 @@ class AB64Climate(AB64Entity, ClimateEntity):
 
     @property
     def current_temperature(self) -> float | None:
-        # Only available when advanced telemetry (register 4012, TA) is opt-in enabled.
+        # Register 4012 (TA) is read every poll regardless of the advanced-telemetry
+        # option (see AB64Coordinator._async_update_data) specifically so this has a
+        # value from first install — only the other 11 advanced fields, and their
+        # sensor entities, stay opt-in. None here means the read itself failed/paused
+        # (see UNSUPPORTED_BLOCK_FAILURES in const.py) or hasn't completed yet, not
+        # that advanced telemetry is off.
         return self.coordinator.data["advanced"].get("indoor_temp")
 
     async def async_set_temperature(self, **kwargs: Any) -> None:

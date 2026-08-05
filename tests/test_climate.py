@@ -170,12 +170,34 @@ async def test_set_temperature_below_min_is_rejected(hass, fake_clients):
     assert not any(w[1] == REG_SETPOINT and w[2] == 10 for w in client.write_log)
 
 
-async def test_current_temperature_none_when_advanced_disabled(hass, fake_clients):
-    """Case 27: current_temperature must be None (not 0, not a crash) when the
-    advanced telemetry block (register 4012, indoor TA) isn't being read at all."""
-    await _setup(hass, fake_clients, options={CONF_ENABLE_ADVANCED: False})
+async def test_current_temperature_has_real_value_when_advanced_disabled(hass, fake_clients):
+    """Telemetry topic (2026-08-05), group A case 1 — the whole reason this round
+    happened: current_temperature must show a real reading from first install,
+    without the user ever touching advanced telemetry options. This REVERSES the
+    old case-27 assertion here (current_temperature was None with advanced off) —
+    that was correct under the pre-2026-08-05 contract, where the indoor block
+    (register 4012, TA) was only read when CONF_ENABLE_ADVANCED was on. Since then
+    AB64Coordinator reads the indoor block unconditionally every poll (see the
+    comment in climate.py's current_temperature and coordinator.py's
+    _async_update_data) — only the other 11 advanced fields, and their sensor
+    entities, stay opt-in. See test_no_advanced_sensor_entities_created_when_
+    disabled_even_though_indoor_is_read below for the "reading a value" vs
+    "creating a sensor entity" distinction this reversal depends on."""
+    client = seed_happy_path(fake_clients)
+    client.set_registers(TEST_UNIT_ID, ADV_INDOOR_START, [24, 0, 0, 0, 0, 0, 0, 0, 0])
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"host": TEST_HOST, "port": TEST_PORT, CONF_UNIT_ID: TEST_UNIT_ID},
+        options={CONF_ENABLE_ADVANCED: False},
+        unique_id=f"{TEST_HOST}:{TEST_PORT}:{TEST_UNIT_ID}",
+        title=TEST_NAME,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
     state = hass.states.get(ENTITY_ID)
-    assert state.attributes.get("current_temperature") is None
+    assert state.attributes.get("current_temperature") == 24
 
 
 async def test_current_temperature_reflects_indoor_temp_when_advanced_enabled(
@@ -310,12 +332,16 @@ async def test_rapid_successive_writes_transaction_count_on_bus(hass, fake_clien
     assert [w[2] for w in setpoint_writes] == [18, 19, 20, 21, 22]
 
     # The real finding this test exists to surface: async_refresh() has zero
-    # cooldown, so each write is immediately followed by a full basic-block read
-    # (12 registers) before the next write can even start (serialized by the hub
-    # lock) — 5 user actions become 5 writes + 5 full-block reads = 10 frames.
+    # cooldown, so each write is immediately followed by a full refresh before the
+    # next write can even start (serialized by the hub lock). Since the telemetry
+    # topic (2026-08-05) made AB64Coordinator read the indoor advanced block (TA,
+    # register 4012) on every poll — not just when advanced telemetry is opted in,
+    # see current_temperature in climate.py — each refresh is now 2 read frames
+    # (basic block + indoor block), not 1: 5 user actions become 5 writes + 5×2
+    # reads = 15 frames, not the 10 this test measured before that change.
     assert len(write_ops) == 5
-    assert len(read_ops) == 5
-    assert total_ops == 10
+    assert len(read_ops) == 10
+    assert total_ops == 15
 
     # Final state must reflect the LAST write, not an earlier one clobbered by a
     # stale read racing with a later write (the concern raised in the task spec).
@@ -377,10 +403,12 @@ async def test_set_temperature_with_hvac_mode_writes_both_single_refresh(hass, f
     assert mode_writes[-1] == (TEST_UNIT_ID, REG_MODE, 4)  # MODE_COOL
     assert setpoint_writes[-1] == (TEST_UNIT_ID, REG_SETPOINT, 24)
 
-    # Exactly one refresh (one read) for this single service call, not two — the
-    # mode write must have gone through with refresh=False.
+    # Exactly one refresh for this single service call, not two — the mode write
+    # must have gone through with refresh=False. One refresh is 2 read frames
+    # (basic block + the indoor advanced block read unconditionally since the
+    # telemetry topic, 2026-08-05 — see the transaction-count test above), not 1.
     read_ops = [e for e in client.op_log[baseline:] if e.startswith("read_start")]
-    assert len(read_ops) == 1
+    assert len(read_ops) == 2
 
     state = hass.states.get(ENTITY_ID)
     assert state.state == HVACMode.COOL

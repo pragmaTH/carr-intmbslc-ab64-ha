@@ -57,7 +57,8 @@
           "enable_advanced_telemetry": "Enable advanced telemetry sensors"
         },
         "data_description": {
-          "scan_interval": "One read takes about 60-80 ms, so 1 AC alone at a 1-second interval uses roughly 8% of the RS-485 bus's time (around 20-25% with advanced telemetry enabled); 12 AB64 units sharing one gateway at 1 second each would use roughly 96% of it, effectively saturating the bus. Pick a value based on how many AB64 units share this gateway, not just this one entry."
+          "scan_interval": "One read takes about 115 ms (measured on real hardware), and this integration reads 2 register blocks per poll by default — 3 with advanced telemetry enabled. So one AC alone at a 1-second interval uses roughly 23% of the RS-485 bus's time, or about 35% with advanced telemetry on. Four AB64 units sharing one gateway at 1 second each would saturate it. Pick a value based on how many AB64 units share this gateway, not just this one entry.",
+          "enable_advanced_telemetry": "Turns on roughly 12 additional sensors for indoor/outdoor telemetry (temperatures, compressor current/speed, fan speeds). Some of these registers aren't present on every AC model or firmware — those sensors will go unavailable on their own. But if one instead shows a value stuck at 0 that never moves even under heavy load, suspect that register isn't supported on this AC rather than trusting it as a real reading."
         }
       }
     },

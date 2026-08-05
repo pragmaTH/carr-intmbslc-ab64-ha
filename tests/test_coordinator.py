@@ -19,12 +19,15 @@ from custom_components.carr_ab64.const import (
     ADV_INDOOR_START,
     ADV_NO_VALUE,
     ADV_OUTDOOR_START,
+    BASIC_BLOCK_START,
     CONF_ENABLE_ADVANCED,
     CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
     DOMAIN,
     MAX_CONSECUTIVE_READ_FAILURES,
     REG_SW_VERSION,
+    UNSUPPORTED_BLOCK_FAILURES,
+    UNSUPPORTED_BLOCK_RETRY_LADDER,
 )
 from custom_components.carr_ab64.coordinator import AB64Coordinator
 
@@ -50,7 +53,17 @@ def _make_entry(*, options: dict | None = None, unit_id: int = TEST_UNIT_ID) -> 
 
 
 async def test_happy_path_data_contract(hass, fake_clients):
-    """Case 5: confirmed real bring-up values decode to the locked data contract."""
+    """Case 5: confirmed real bring-up values decode to the locked data contract.
+
+    `advanced` is no longer always `{}` with CONF_ENABLE_ADVANCED off — the
+    telemetry topic (2026-08-05) made the indoor block (TA + 4 siblings) read
+    unconditionally every poll, specifically so climate.current_temperature has
+    a value from first install (see test_happy_path_data_contract's sibling in
+    test_climate.py, test_current_temperature_has_real_value_when_advanced_
+    disabled). The outdoor block is still opt-in-only, so `advanced` here holds
+    exactly the 5 indoor keys — no outdoor keys — all reading 0 because this
+    fixture never seeds ADV_INDOOR_START registers (the fake client's default
+    read value)."""
     seed_happy_path(fake_clients)
     entry = _make_entry()
     entry.add_to_hass(hass)
@@ -66,7 +79,13 @@ async def test_happy_path_data_contract(hass, fake_clients):
         "set_temp": 22,
         "error_code": 0,
         "ab_bus_fault": False,
-        "advanced": {},
+        "advanced": {
+            "indoor_temp": 0,
+            "indoor_coil_temp_tcj": 0,
+            "indoor_coil_temp_tc2": 0,
+            "indoor_fan_rpm": 0,
+            "filter_sign_timer": 0,
+        },
     }
 
 
@@ -546,3 +565,418 @@ async def test_write_failure_raises_homeassistant_error(hass, fake_clients):
     client.fail_write = True
     with pytest.raises(HomeAssistantError):
         await entry.runtime_data.async_write(4, 22)
+
+
+# --- telemetry topic (2026-08-05): group A — block-read counts ------------------
+
+
+async def test_advanced_disabled_reads_basic_and_indoor_blocks_only(hass, fake_clients):
+    """Item 3: with CONF_ENABLE_ADVANCED off, every poll must read exactly the
+    basic block and the indoor advanced block (for current_temperature) — and
+    must NOT touch the outdoor block (ADV_OUTDOOR_START/4410) at all. Asserted
+    against the addresses the fake client actually saw, not against
+    coordinator.data (which can look right even if an extra/wrong read happened
+    on the wire)."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    read_log_before = len(client.read_log)
+    await entry.runtime_data.async_refresh()
+    addresses = {addr for (_, addr, _) in client.read_log[read_log_before:]}
+    assert addresses == {BASIC_BLOCK_START, ADV_INDOOR_START}
+    assert ADV_OUTDOOR_START not in addresses
+
+
+async def test_advanced_enabled_reads_all_three_blocks_and_creates_12_sensors(
+    hass, fake_clients
+):
+    """Item 4: with CONF_ENABLE_ADVANCED on, every poll reads basic + indoor +
+    outdoor (3 blocks), and all 12 advanced sensor entities (5 indoor + 7
+    outdoor — see ADV_INDOOR_FIELDS/ADV_OUTDOOR_FIELDS in const.py) exist in the
+    entity registry. The count half is a light restatement of
+    test_options_flow.py's TOTAL_ADVANCED_SENSORS check, kept here so this one
+    test proves "3 blocks read" and "12 sensors exist" together for the same
+    setup rather than relying on two files agreeing by coincidence."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry(options={CONF_ENABLE_ADVANCED: True})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    read_log_before = len(client.read_log)
+    await entry.runtime_data.async_refresh()
+    addresses = {addr for (_, addr, _) in client.read_log[read_log_before:]}
+    assert addresses == {BASIC_BLOCK_START, ADV_INDOOR_START, ADV_OUTDOOR_START}
+
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    advanced_entities = [
+        e
+        for e in registry.entities.values()
+        if e.domain == "sensor" and "error_code" not in e.unique_id
+    ]
+    assert len(advanced_entities) == 12
+
+
+async def test_enabling_advanced_via_options_reload_starts_reading_outdoor_block(
+    hass, fake_clients
+):
+    """Item 5: installed with advanced off (outdoor never read), then opted in
+    via options — after the reload this triggers, the outdoor block must start
+    being read and all 12 sensors must appear, closing the loop from "off at
+    install" to "on via options" rather than just testing each state in
+    isolation."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    read_log_before = len(client.read_log)
+    await entry.runtime_data.async_refresh()
+    addresses_before = {addr for (_, addr, _) in client.read_log[read_log_before:]}
+    assert ADV_OUTDOOR_START not in addresses_before
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_SCAN_INTERVAL: 30, CONF_ENABLE_ADVANCED: True}
+    )
+    await hass.async_block_till_done()  # options update listener triggers a reload
+
+    reloaded_entry = hass.config_entries.async_get_entry(entry.entry_id)
+    read_log_before2 = len(client.read_log)
+    await reloaded_entry.runtime_data.async_refresh()
+    addresses_after = {addr for (_, addr, _) in client.read_log[read_log_before2:]}
+    assert ADV_OUTDOOR_START in addresses_after
+
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    advanced_entities = [
+        e
+        for e in registry.entities.values()
+        if e.domain == "sensor" and "error_code" not in e.unique_id
+    ]
+    assert len(advanced_entities) == 12
+
+
+# --- telemetry topic (2026-08-05): group B — advanced-block backoff -------------
+
+
+async def test_advanced_block_two_consecutive_failures_still_retries_on_third_poll(
+    hass, fake_clients
+):
+    """Item 6: 2 consecutive failures on the indoor block must NOT pause it yet —
+    UNSUPPORTED_BLOCK_FAILURES is 3, so the 3rd poll must still attempt the
+    read (that 3rd failure is what crosses the threshold and triggers the
+    pause going forward, not this one)."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    client.fail_read_at(TEST_UNIT_ID, ADV_INDOOR_START)
+    coordinator = entry.runtime_data
+    await coordinator.async_refresh()  # miss 1
+    await coordinator.async_refresh()  # miss 2
+
+    read_log_before = len(client.read_log)
+    await coordinator.async_refresh()  # miss 3 — still attempted
+    reads = client.read_log[read_log_before:]
+    assert any(addr == ADV_INDOOR_START for (_, addr, _) in reads), (
+        "3rd poll must still attempt the read"
+    )
+
+
+async def test_advanced_block_stops_reading_after_three_consecutive_failures(
+    hass, fake_clients
+):
+    """Item 7: once 3 consecutive failures have happened, the NEXT poll must not
+    even attempt the read (no read_start for that address at all — not just a
+    read that fails again), and the affected field must read as None."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    client.fail_read_at(TEST_UNIT_ID, ADV_INDOOR_START)
+    coordinator = entry.runtime_data
+    for _ in range(UNSUPPORTED_BLOCK_FAILURES):
+        await coordinator.async_refresh()
+
+    assert coordinator.data["advanced"]["indoor_temp"] is None
+
+    read_log_before = len(client.read_log)
+    await coordinator.async_refresh()
+    reads = client.read_log[read_log_before:]
+    assert not any(addr == ADV_INDOOR_START for (_, addr, _) in reads), (
+        "block must be paused — no read attempt on this poll"
+    )
+
+
+async def test_advanced_block_retries_after_cooldown_then_resets_on_success(
+    hass, fake_clients
+):
+    """Items 8+9 together (sequential states of one run, not independent setups):
+    once paused, the block must stay silent until its cooldown has actually
+    elapsed (checked at 1s under the threshold first, so this isn't just
+    "eventually retries"), retry exactly once when it's due, and — if that
+    retry succeeds — reset ALL of the backoff state (failure counter, retry_at,
+    AND the ladder step — see UNSUPPORTED_BLOCK_RETRY_LADDER in const.py) so
+    subsequent polls go back to reading every time rather than needing 3 fresh
+    failures again to re-pause.
+
+    Updated 2026-08-05 (review M-2): the first trip's cooldown is now
+    UNSUPPORTED_BLOCK_RETRY_LADDER[0] == 60s, not a flat 600s — see
+    test_backoff_ladder_climbs_60_300_600_then_caps_at_600 below for the
+    climbing behavior across repeated failed retries, and
+    test_backoff_step_fully_resets_after_success_ladder_restarts_at_60s for the
+    m-3 gap this test's "counter reset" assertion alone didn't close (a step
+    that failed to reset wouldn't show up as a behavioral difference here,
+    since a step-0 and a step-2 block both "read normally" right after a
+    success — the difference only appears on the *next* trip)."""
+    with freeze_time("2026-01-01 00:00:00") as frozen:
+        client = seed_happy_path(fake_clients)
+        entry = _make_entry()
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        client.fail_read_at(TEST_UNIT_ID, ADV_INDOOR_START)
+        coordinator = entry.runtime_data
+        for _ in range(UNSUPPORTED_BLOCK_FAILURES):
+            await coordinator.async_refresh()
+        assert coordinator.data["advanced"]["indoor_temp"] is None
+
+        # Not due yet (1s under the first rung, 60s) -> still silent.
+        frozen.tick(timedelta(seconds=UNSUPPORTED_BLOCK_RETRY_LADDER[0] - 1))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        reads = client.read_log[read_log_before:]
+        assert not any(addr == ADV_INDOOR_START for (_, addr, _) in reads), (
+            "must not retry before the cooldown has actually elapsed"
+        )
+
+        # Now due -> retries once. Fix the underlying failure and give it a
+        # distinguishable value so "succeeded" is unambiguous (not just "not None").
+        client.clear_fail_read_at(TEST_UNIT_ID)
+        client.set_registers(TEST_UNIT_ID, ADV_INDOOR_START, [24, 0, 0, 0, 0, 0, 0, 0, 0])
+        frozen.tick(timedelta(seconds=2))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        reads = client.read_log[read_log_before:]
+        assert any(addr == ADV_INDOOR_START for (_, addr, _) in reads), (
+            "must retry exactly once once the cooldown has elapsed"
+        )
+        assert coordinator.data["advanced"]["indoor_temp"] == 24
+
+        # m-3: all THREE pieces of backoff state must reset, not just the ones
+        # that happen to be externally visible via coordinator.data.
+        assert coordinator._block_failures["indoor"] == 0
+        assert coordinator._block_retry_at["indoor"] is None
+        assert coordinator._block_retry_step["indoor"] == 0
+
+        # Item 9: counter reset by that success -> next poll reads normally again,
+        # not gated behind another cooldown wait.
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        reads = client.read_log[read_log_before:]
+        assert any(addr == ADV_INDOOR_START for (_, addr, _) in reads), (
+            "counter must have reset on the successful retry — normal polling resumed"
+        )
+        assert coordinator.data["advanced"]["indoor_temp"] == 24
+
+
+async def test_backoff_ladder_climbs_60_300_600_then_caps_at_600(hass, fake_clients):
+    """Item 2 (review M-2): a block that keeps failing every retry must climb
+    UNSUPPORTED_BLOCK_RETRY_LADDER (60 -> 300 -> 600) rather than reusing the
+    same pause every time, and must cap at the ladder's last rung (600s)
+    instead of continuing to grow once it's climbed past the end. Also covers
+    m-3 gap #1 directly: each failed retry must schedule a genuinely new
+    cooldown, not fall back to reading every poll — checked explicitly at the
+    60->300 transition below ("still silent partway through the new wait"),
+    and implicitly at every other transition by the same "not due yet" pattern
+    used throughout this test."""
+    with freeze_time("2026-01-01 00:00:00") as frozen:
+        client = seed_happy_path(fake_clients)
+        client.fail_read_at(TEST_UNIT_ID, ADV_INDOOR_START)
+        entry = _make_entry()
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+
+        # First trip needs 2 more failures (setup's first_refresh was failure #1).
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()
+        assert coordinator._block_retry_step["indoor"] == 1  # tripped once already
+
+        # --- Rung 1 -> 2: 60s pause, retry fails, next pause becomes 300s -------
+        frozen.tick(timedelta(seconds=UNSUPPORTED_BLOCK_RETRY_LADDER[0] - 1))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert not any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "must not retry before the 60s rung is actually due"
+
+        frozen.tick(timedelta(seconds=2))  # now past the 60s mark
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "must retry once the 60s rung is due"
+        assert coordinator._block_retry_step["indoor"] == 2
+
+        # m-3 gap #1, explicit: mid-way through the NEW (300s) wait, still silent —
+        # proves the failed retry set a fresh cooldown, not "read every poll".
+        frozen.tick(timedelta(seconds=150))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert not any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "a failed retry must schedule a new wait, not resume reading every poll"
+
+        # --- Rung 2 -> 3: finish the 300s wait, retry fails, next becomes 600s --
+        frozen.tick(timedelta(seconds=150))  # total 300s since the previous retry
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "must retry once the 300s rung is due"
+        assert coordinator._block_retry_step["indoor"] == 3
+
+        # --- Rung 3: 600s wait, retry fails, must cap at 600s (not grow to 900s) ---
+        frozen.tick(timedelta(seconds=UNSUPPORTED_BLOCK_RETRY_LADDER[2] - 1))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert not any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "must not retry before the 600s rung is actually due"
+
+        frozen.tick(timedelta(seconds=2))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "must retry once the 600s rung is due"
+        # Capped: index clamps to the ladder's last rung instead of indexing past it.
+        assert coordinator._block_retry_step["indoor"] == 4
+
+        frozen.tick(timedelta(seconds=UNSUPPORTED_BLOCK_RETRY_LADDER[2] - 1))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert not any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "still capped at 600s, not grown to some longer wait"
+
+
+async def test_backoff_step_fully_resets_after_success_ladder_restarts_at_60s(
+    hass, fake_clients
+):
+    """m-3 gap #2, the sharper version: the "counter reset" assertion in
+    test_advanced_block_retries_after_cooldown_then_resets_on_success only
+    proves reads resume — that would look identical whether or not the ladder
+    STEP specifically reset, since a step-0 and a step-2 block both read
+    normally right after a success. The only way to actually distinguish them
+    is to trip the block again afterwards and check where the NEW ladder
+    starts. Climbs to step 2 (a 300s pause pending), lets a retry succeed, then
+    fails 3 fresh times — the resulting pause must be 60s again, not 300s or
+    600s, or the mutation this test exists to catch (step never reset) would
+    make production hardware endure a resurfaced hiccup's pause growing
+    forever across unrelated incidents."""
+    with freeze_time("2026-01-01 00:00:00") as frozen:
+        client = seed_happy_path(fake_clients)
+        client.fail_read_at(TEST_UNIT_ID, ADV_INDOOR_START)
+        entry = _make_entry()
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        coordinator = entry.runtime_data
+
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()  # 3rd failure -> tripped, step 0 -> 1
+
+        frozen.tick(timedelta(seconds=UNSUPPORTED_BLOCK_RETRY_LADDER[0] + 1))
+        await coordinator.async_refresh()  # 60s retry fails -> step 1 -> 2
+        assert coordinator._block_retry_step["indoor"] == 2
+
+        # Let the pending (300s) retry succeed.
+        client.clear_fail_read_at(TEST_UNIT_ID)
+        client.set_registers(TEST_UNIT_ID, ADV_INDOOR_START, [24, 0, 0, 0, 0, 0, 0, 0, 0])
+        frozen.tick(timedelta(seconds=UNSUPPORTED_BLOCK_RETRY_LADDER[1] + 1))
+        await coordinator.async_refresh()
+        assert coordinator.data["advanced"]["indoor_temp"] == 24
+        assert coordinator._block_retry_step["indoor"] == 0, (
+            "step must be back to 0 immediately after the success"
+        )
+
+        # Fresh trip: 3 new consecutive failures.
+        client.fail_read_at(TEST_UNIT_ID, ADV_INDOOR_START)
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()
+        await coordinator.async_refresh()  # 3rd fresh failure -> trips again
+
+        # If step had NOT reset, this would trip at LADDER[2]=600s (or LADDER[1]=300s)
+        # instead of LADDER[0]=60s — check the 60s rung specifically.
+        frozen.tick(timedelta(seconds=UNSUPPORTED_BLOCK_RETRY_LADDER[0] - 1))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert not any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        )
+
+        frozen.tick(timedelta(seconds=2))
+        read_log_before = len(client.read_log)
+        await coordinator.async_refresh()
+        assert any(
+            a == ADV_INDOOR_START for (_, a, _) in client.read_log[read_log_before:]
+        ), "the fresh trip must pause only 60s, proving the ladder step really reset"
+
+
+async def test_basic_block_three_strikes_unaffected_by_advanced_block_backoff_state(
+    hass, fake_clients
+):
+    """Item 10 (🔴): MAX_CONSECUTIVE_READ_FAILURES (basic block, drives
+    UpdateFailed/entity-unavailable) and UNSUPPORTED_BLOCK_FAILURES (per
+    advanced-block backoff, degrades that block's fields to None) are separate
+    counters and must never cross-contaminate. Proves both directions: (1) the
+    indoor block failing 3x into backoff must NOT make last_update_success
+    False while basic reads keep succeeding; (2) once the basic block itself
+    starts failing (with an already-paused advanced block sitting alongside
+    it), it still takes exactly MAX_CONSECUTIVE_READ_FAILURES misses — not
+    more, not fewer — to flip the entity unavailable."""
+    client = seed_happy_path(fake_clients)
+    entry = _make_entry()
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+
+    # Phase 1: indoor block fails into backoff; basic block keeps succeeding.
+    client.fail_read_at(TEST_UNIT_ID, ADV_INDOOR_START)
+    for _ in range(UNSUPPORTED_BLOCK_FAILURES):
+        await coordinator.async_refresh()
+    assert coordinator.last_update_success is True, (
+        "advanced block backoff must not affect overall update success"
+    )
+    assert coordinator.data["advanced"]["indoor_temp"] is None
+
+    # Phase 2: now the basic block starts failing too — its own 3-strike
+    # tolerance must apply on its own schedule, unaffected by the already-paused
+    # advanced block.
+    client.fail_read_at(TEST_UNIT_ID, BASIC_BLOCK_START)
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is True
+    await coordinator.async_refresh()
+    assert coordinator.last_update_success is False
+
+    state = hass.states.get("climate.living_room_ac")
+    assert state.state == "unavailable"

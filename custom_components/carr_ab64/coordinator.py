@@ -37,6 +37,8 @@ from .const import (
     REG_ON_OFF,
     REG_SETPOINT,
     REG_SWING,
+    UNSUPPORTED_BLOCK_FAILURES,
+    UNSUPPORTED_BLOCK_RETRY_LADDER,
 )
 from .hub import AB64Hub, AB64ReadError, AB64WriteError
 
@@ -78,6 +80,16 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
         self.sw_version: str | None = None
         self._fault_since: datetime | None = None
         self._consecutive_failures = 0
+        # Per-advanced-block backoff state (indoor/outdoor tracked independently) —
+        # see UNSUPPORTED_BLOCK_FAILURES/UNSUPPORTED_BLOCK_RETRY_LADDER in const.py.
+        # Deliberately separate from _consecutive_failures above, which is
+        # basic-block-only and drives UpdateFailed, not a block-level pause.
+        self._block_failures: dict[str, int] = {"indoor": 0, "outdoor": 0}
+        self._block_retry_at: dict[str, datetime | None] = {"indoor": None, "outdoor": None}
+        # Index into UNSUPPORTED_BLOCK_RETRY_LADDER for this block's *next* pause —
+        # advances by 1 each time a retry-after-cooldown attempt fails (clamped to the
+        # ladder's last rung), resets to 0 on any success.
+        self._block_retry_step: dict[str, int] = {"indoor": 0, "outdoor": 0}
 
     @property
     def advanced_enabled(self) -> bool:
@@ -114,16 +126,22 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
         error_code = regs[BASIC_REG_OFFSETS["error_code"]]
         ab_bus_fault = self._compute_ab_bus_fault(error_code)
 
+        # Indoor block (TA/coil temps/fan/filter timer) is read every poll regardless
+        # of advanced_enabled — climate.current_temperature depends on indoor_temp
+        # and must have a value from first install, not only once a user opts into
+        # advanced telemetry. Reading it is independent from *displaying* it: sensor.py
+        # still only creates the 5 indoor AB64AdvancedSensor entities when the option
+        # is on — this dict just needs the value available for climate to read.
         advanced: dict[str, int | None] = {}
+        advanced.update(
+            await self._async_read_advanced_block(
+                "indoor", ADV_INDOOR_START, ADV_INDOOR_COUNT, ADV_INDOOR_FIELDS
+            )
+        )
         if self.advanced_enabled:
             advanced.update(
                 await self._async_read_advanced_block(
-                    ADV_INDOOR_START, ADV_INDOOR_COUNT, ADV_INDOOR_FIELDS
-                )
-            )
-            advanced.update(
-                await self._async_read_advanced_block(
-                    ADV_OUTDOOR_START, ADV_OUTDOOR_COUNT, ADV_OUTDOOR_FIELDS
+                    "outdoor", ADV_OUTDOOR_START, ADV_OUTDOOR_COUNT, ADV_OUTDOOR_FIELDS
                 )
             )
 
@@ -150,20 +168,74 @@ class AB64Coordinator(DataUpdateCoordinator[dict]):
         return elapsed >= AB_BUS_FAULT_DEBOUNCE_SECONDS
 
     async def _async_read_advanced_block(
-        self, start: int, count: int, fields: dict[int, str]
+        self, block_key: str, start: int, count: int, fields: dict[int, str]
     ) -> dict[str, int | None]:
-        """Read one advanced telemetry block. Failures degrade to None, never raise UpdateFailed."""
+        """Read one advanced telemetry block. Failures degrade to None, never raise
+        UpdateFailed — but after UNSUPPORTED_BLOCK_FAILURES consecutive failures for
+        this block_key, stop attempting the read entirely for a while rather than
+        paying a full read timeout on every single poll (see const.py; this matters
+        most for the indoor block, which is now read unconditionally rather than only
+        when opted in). The pause climbs a ladder (UNSUPPORTED_BLOCK_RETRY_LADDER)
+        instead of jumping straight to the longest pause, so a brief RS-485 hiccup —
+        the common case — recovers in under a minute instead of being punished with
+        the same 10-minute silence reserved for a register that's genuinely missing
+        on this AC model/firmware.
+        """
+        now = dt_util.utcnow()
+        retry_at = self._block_retry_at[block_key]
+        if retry_at is not None and now < retry_at:
+            return {name: None for name in fields.values()}
+
         try:
             regs = await self.hub.async_read_holding(self.unit_id, start, count)
         except (AB64ReadError, ConnectionException) as err:
+            was_paused = retry_at is not None
+            self._block_failures[block_key] += 1
+            failures = self._block_failures[block_key]
+            if failures >= UNSUPPORTED_BLOCK_FAILURES:
+                step = self._block_retry_step[block_key]
+                delay = UNSUPPORTED_BLOCK_RETRY_LADDER[
+                    min(step, len(UNSUPPORTED_BLOCK_RETRY_LADDER) - 1)
+                ]
+                self._block_retry_at[block_key] = now + timedelta(seconds=delay)
+                self._block_retry_step[block_key] = step + 1
+                _LOGGER.debug(
+                    "%s block (%s-%s) for unit %s %s; pausing reads for %s seconds: %s",
+                    block_key,
+                    start,
+                    start + count - 1,
+                    self.unit_id,
+                    "still unresponsive after the retry" if was_paused else
+                    f"failed {failures} times in a row",
+                    delay,
+                    err,
+                )
+            else:
+                _LOGGER.debug(
+                    "%s block (%s-%s) unavailable for unit %s (%s/%s consecutive "
+                    "failures): %s",
+                    block_key,
+                    start,
+                    start + count - 1,
+                    self.unit_id,
+                    failures,
+                    UNSUPPORTED_BLOCK_FAILURES,
+                    err,
+                )
+            return {name: None for name in fields.values()}
+
+        if retry_at is not None:
             _LOGGER.debug(
-                "Advanced block %s-%s unavailable for unit %s: %s",
+                "%s block (%s-%s) for unit %s responded again after being paused; "
+                "resuming normal reads",
+                block_key,
                 start,
                 start + count - 1,
                 self.unit_id,
-                err,
             )
-            return {name: None for name in fields.values()}
+        self._block_failures[block_key] = 0
+        self._block_retry_at[block_key] = None
+        self._block_retry_step[block_key] = 0
         return {
             name: self._decode_advanced_value(name, regs[addr - start])
             for addr, name in fields.items()
