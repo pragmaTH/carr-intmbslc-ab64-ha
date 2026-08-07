@@ -43,6 +43,16 @@ secrets.yaml
 credentials.json
 token.json
 
+# โทเคน HA MCP ของเครื่องทดสอบ "ต้อง" อยู่นอก working tree เสมอ
+# (~/.config/carr-ab64/ha-mcp-url) — ตัดสินใจ 2026-08-05 หลังชั่งกับทางเลือก
+# "เก็บในรีโป + gitignore + pre-commit hook" แล้วเลือกทางที่ความเสี่ยง push = 0
+# บรรทัดล่างเป็นตาข่ายกันเผลอ เผื่อมีใครก๊อปโทเคนเข้ามาในรีโปภายหลัง
+.claude/shared/secrets/
+ha-mcp-url*
+*.token
+# ไฟล์ howto ก็ไม่ push: ไม่มีโทเคน แต่ระบุ IP เครื่องทดสอบของไซต์จริง
+.claude/shared/ha-mcp-howto.md
+
 # --- Editor / OS ---
 .vscode/
 .idea/
