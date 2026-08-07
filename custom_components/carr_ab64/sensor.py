@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import REVOLUTIONS_PER_MINUTE, UnitOfTemperature
+from homeassistant.const import REVOLUTIONS_PER_MINUTE, UnitOfTemperature, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -53,9 +53,32 @@ ADV_SENSOR_META: dict[str, AdvancedSensorMeta] = {
     "indoor_fan_rpm": AdvancedSensorMeta(
         None, REVOLUTIONS_PER_MINUTE, SensorStateClass.MEASUREMENT, enabled_default=False
     ),
-    # No state_class: meaning/unit of this register (hours? cycle count?) is unknown,
-    # so we don't want HA building a long-term statistic that can't be interpreted.
-    "filter_sign_timer": AdvancedSensorMeta(None, None, None, enabled_default=False),
+    # Unit confirmed 2026-08-07 by two independent measurements on real hardware:
+    # (1) the register was caught ticking twice — 4272->4273 during 15:05:34-15:07:34,
+    # then 4273->4274 during 16:05:56-16:07:56, ~60 minutes apart both times — and
+    # (2) the accumulated value (4272) on a unit installed ~570 days earlier works out
+    # to ~7.5 h/day, matching the office's independently-reported ~8 h/day usage (a
+    # 24/7-since-install hypothesis would need ~13,700, which the value rules out).
+    # climate stayed "cool" for the full 2 h measurement window, so this counts hours
+    # the unit has been running, not wall-clock hours since install. The evidence
+    # can't separate active-cooling runtime from fan-only runtime or simple power-on
+    # time — an inverter-driven cooling stage doesn't run continuously just because
+    # the unit is in cool mode — so don't narrow this wording further without a
+    # measurement that can actually tell those apart.
+    # TOTAL_INCREASING (not MEASUREMENT) because filter cleaning resets the counter,
+    # and HA treats a drop in a total_increasing value as a reset rather than a
+    # negative delta.
+    # This is NOT the same situation as compressor_current below: that one has a
+    # single evidence source (an observed value range) and any unit for it requires
+    # guessing an unverified divisor. This one has two independent evidence sources
+    # (measured tick period + value magnitude vs. known install age) that agree, and
+    # the unit (1 tick = 1 hour) requires no multiplier/divisor guess at all. Don't
+    # use this comment as precedent for adding a unit to compressor_current — the
+    # evidence bar it failed to clear is still not cleared.
+    "filter_sign_timer": AdvancedSensorMeta(
+        SensorDeviceClass.DURATION, UnitOfTime.HOURS, SensorStateClass.TOTAL_INCREASING,
+        enabled_default=False,
+    ),
     "outdoor_evaporator_temp_te": AdvancedSensorMeta(
         SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT
     ),

@@ -148,7 +148,7 @@ The advanced telemetry register map comes from the vendor manual, but the manual
 | Negative temperature readings use two's complement | **Not yet confirmed** — this only shows up when a value actually goes negative (e.g. evaporator temp during defrost/heating), which hasn't been observed yet. |
 | Compressor current unit | **Unknown** — confirmed only that it is *not* a direct amps reading (see ramp test below for why). |
 | Compressor speed unit | Believed to be **rps** (revolutions per second) — physics rules out the other plausible units, but there's no vendor documentation confirming it. |
-| Filter-sign timer unit | **Unknown**. |
+| Filter-sign timer unit | **Confirmed 2026-08-07** — hours the unit has been running, not wall-clock hours. Two independent tick measurements on real hardware caught the register incrementing about once per hour of runtime, and the raw value matches the unit's known install date at a plausible runtime-per-day figure. The evidence doesn't distinguish compressor run-time from fan-only or simply-powered-on time — see the decision in `CLAUDE.md` for the full evidence. |
 
 ## Verifying advanced telemetry on your own hardware (ramp test)
 

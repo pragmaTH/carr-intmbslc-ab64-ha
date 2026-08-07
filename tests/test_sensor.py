@@ -1,7 +1,8 @@
 """Sensor platform tests: error_code decoding + advanced sensor registry defaults."""
 from __future__ import annotations
 
-from homeassistant.const import REVOLUTIONS_PER_MINUTE
+from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.const import REVOLUTIONS_PER_MINUTE, UnitOfTime
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -93,10 +94,85 @@ async def test_advanced_sensors_have_correct_enabled_default_split(hass, fake_cl
         )
 
 
-def test_filter_sign_timer_has_no_state_class():
-    """m7: unit/meaning of this register (hours? cycle count?) is unknown, so HA
-    must not build a long-term statistic for it that can't be interpreted."""
-    assert ADV_SENSOR_META["filter_sign_timer"].state_class is None
+# M-2 (filterhours-review.md): the test above compares registry wiring against
+# `meta.enabled_default` itself — it proves meta -> registry plumbing works,
+# but is a tautology against the *policy* of which fields get to be
+# default-on: if someone flips a field's `enabled_default` in ADV_SENSOR_META,
+# the test above stays green regardless, because both sides of its assertion
+# move together. Reviewer proved this with mutation (M-E/M-F in
+# filterhours-review.md): promoting compressor_rpm or indoor_fan_rpm to
+# default-on left the full suite at 190 passed.
+# NOTE (qa-filterwording, topic `cleanup` round 3): the task spec for this test
+# guessed the current policy was "indoor_temp alone" — that guess is WRONG
+# against the real, already-reviewed code (filterhours-review.md's C-3 audited
+# every field's enabled_default before/after topic `cleanup` round 2 and found
+# none changed). The actual, accepted split — confirmed here by reading
+# ADV_SENSOR_META directly, not by trusting the task's parenthetical — is
+# "temperature-ish fields default-enabled; rpm/current/filter_timer
+# default-disabled," which is also exactly what the tautological test above
+# already said in its own docstring before this fix. This list is NOT
+# "field creation is gated by CONF_ENABLE_ADVANCED except indoor_temp" (a
+# different axis, in sensor.py's async_setup_entry) — it's specifically
+# `AdvancedSensorMeta.enabled_default`, i.e. entity_registry_enabled_default,
+# which only matters for fields that do get created.
+DEFAULT_ENABLED_ADVANCED_FIELDS = frozenset({
+    "indoor_temp",
+    "indoor_coil_temp_tcj",
+    "indoor_coil_temp_tc2",
+    "outdoor_evaporator_temp_te",
+    "outdoor_temp_to",
+    "outdoor_discharge_temp_td",
+    "outdoor_suction_temp_ts",
+})
+
+
+def test_only_temperature_fields_default_enabled_among_advanced_sensors():
+    """M-2 (filterhours-review.md): compares ADV_SENSOR_META against a policy
+    list hardcoded independently here, so — unlike the split test above —
+    this one can actually catch a field being promoted to (or demoted from)
+    default-on. Reviewer proved the split test above is a tautology by
+    mutation (M-E/M-F: promoting compressor_rpm or indoor_fan_rpm to
+    default-on left the full suite at 190 passed) — this test is what closes
+    that gap.
+
+    The policy this pins down: the 7 temperature-device-class fields default
+    enabled; the other 5 (fan/compressor rpm, compressor current, filter
+    timer) default disabled, because their values are either noisier or less
+    universally meaningful across models than a plain temperature reading —
+    an integration-engineer judgment call from topic `core`, not something
+    this topic changed (filterhours-review.md C-3: no field's enabled_default
+    changed across topic `cleanup` round 2).
+
+    If this test goes RED because someone deliberately moved a field between
+    the two groups: do NOT just edit this list to match. Go re-read
+    CLAUDE.md's advanced-telemetry decision and confirm the change is an
+    intentional, justified policy update — then update this list as part of
+    that change, not as a silent side effect of a test failure.
+    """
+    for field_key, meta in ADV_SENSOR_META.items():
+        expected = field_key in DEFAULT_ENABLED_ADVANCED_FIELDS
+        assert meta.enabled_default == expected, (
+            f"{field_key}: enabled_default={meta.enabled_default}, but the "
+            f"hardcoded policy list says it should be {expected} "
+            f"(DEFAULT_ENABLED_ADVANCED_FIELDS={sorted(DEFAULT_ENABLED_ADVANCED_FIELDS)})"
+        )
+
+
+def test_filter_sign_timer_has_hours_duration_meta():
+    """Unit confirmed 2026-08-07 (two independent measurements — see sensor.py
+    comment): 1 tick = 1 hour the unit has been running. The evidence (a ~60min
+    tick period, plus the accumulated value matching known daily on-hours) does
+    NOT distinguish compressor-runtime from fan-runtime from unit-on-time —
+    `climate = cool` for the measurement window doesn't mean the compressor (an
+    inverter compressor that can idle at setpoint) span the whole window, so
+    "compressor" is not a claim this data supports (filterhours-review.md M-1).
+    total_increasing supports the counter resetting on filter cleaning. Still
+    opt-in (enabled_default=False)."""
+    meta = ADV_SENSOR_META["filter_sign_timer"]
+    assert meta.device_class is SensorDeviceClass.DURATION
+    assert meta.unit is UnitOfTime.HOURS
+    assert meta.state_class is SensorStateClass.TOTAL_INCREASING
+    assert meta.enabled_default is False
 
 
 # --- telemetry topic (2026-08-05): group A case 2 — reading != creating an entity

@@ -161,7 +161,12 @@ def test_th_json_port_data_description_still_warns_about_ew11_8899():
 
 @pytest.mark.parametrize(
     "expected",
-    ["502", "8899", "115", "4.6", "9.2", "18.4", "27.6", "1-64"],
+    # m-1 (cleanup-review.md): "6.9" and "13.8" are the advanced-telemetry-on
+    # bus-math figures for 1 and 2 units — same family as 4.6/9.2/18.4/27.6
+    # below, just previously missing from this list. Reviewer proved this gap
+    # with mutation E: swapping "6.9/13.8" for wrong numbers in th.json left
+    # the full suite green (nothing else in the suite reads these two).
+    ["502", "8899", "115", "4.6", "9.2", "18.4", "27.6", "6.9", "13.8", "1-64"],
 )
 def test_th_json_contains_expected_number(expected: str):
     raw = TH_PATH.read_text(encoding="utf-8")
@@ -266,6 +271,99 @@ def test_th_json_compressor_names_carry_no_unit(path: str):
     for forbidden in _FORBIDDEN_UNIT_TOKENS:
         assert forbidden not in lowered, f"{path} contains forbidden unit token {forbidden!r}: {value!r}"
     assert not _STANDALONE_LATIN_A.search(value), f"{path} contains a standalone 'A' (implies Amps): {value!r}"
+
+
+# --- Q-1 (topic `cleanup`): en/th info-parity for the "115ms is measured, not
+# a vendor spec" caveat --------------------------------------------------------
+
+_SCAN_INTERVAL_DESC_PATH = "options.step.init.data_description.scan_interval"
+
+
+@pytest.mark.parametrize(
+    "loader,expected_marker",
+    [(_load_strings, "measured"), (_load_th, "วัดจริง")],
+    ids=["en", "th"],
+)
+def test_scan_interval_description_marks_115ms_as_measured(loader, expected_marker):
+    """Q-1 (topic `cleanup`) — guards against nit n-1 (`poll5s-review.md`,
+    reiterated `thai-review.md` m-2) coming back: the scan_interval
+    data_description explains that one Modbus read takes ~115 ms.
+    `translations/th.json` has always said this is a *measured* figure, not a
+    manufacturer spec ("วัดจริง ไม่ใช่ค่าจากผู้ผลิต") — `strings.json` (and
+    therefore `translations/en.json`, which must stay byte-identical to it)
+    didn't say that before topic `cleanup`, so an English-language reader
+    could mistake 115 ms for a datasheet number instead of the single-unit
+    DEBUG-log measurement CLAUDE.md's poll-interval decision describes it as.
+
+    This test locks only a *marker word* per language ("measured" / "วัดจริง"),
+    not the surrounding sentence — docs-engineer is free to word the rest of
+    the description however they like; only the presence of the
+    "this-was-measured" caveat is load-bearing, checked independently per
+    language, so English and Thai can never silently drift apart on this
+    fact again the way they did before this task.
+
+    Why this lives in a file named `_th` even though the English side
+    (`strings.json`) is one of the two parametrized cases: every other test
+    in this file already loads `strings.json` as the English baseline to
+    diff Thai against (see `_load_strings`, used throughout for key-parity
+    and untranslated-value checks) — this is the same "compare th against en
+    for one specific fact" shape, just checking presence of a marker instead
+    of key-parity or non-identity. There's no other test file whose subject
+    is "does this one English/Thai pair of strings agree," so splitting the
+    English half out into a different file would separate two assertions
+    that only make sense read together.
+    """
+    description = _get_by_path(loader(), _SCAN_INTERVAL_DESC_PATH)
+    assert expected_marker in description, (
+        f"{loader.__name__}: scan_interval data_description is missing the "
+        f"'measured, not a vendor spec' marker ({expected_marker!r}) — see "
+        "CLAUDE.md's poll-interval decision: the 115ms figure comes from one "
+        "real unit's DEBUG log, not a datasheet, and losing this caveat in "
+        "either language lets readers of that language mistake it for a spec "
+        f"(got: {description!r})"
+    )
+
+
+# --- m-2 (cleanup-review.md): AC-2's wording fixes must not be silently revertible ---
+
+
+def test_th_json_scan_interval_description_keeps_ac2_wording_fixes():
+    """m-2 (cleanup-review.md, topic `cleanup` "เก็บตก") — guards both halves of
+    AC-2 (`plan-cleanup.md`), which had ZERO test coverage before this: reviewer
+    proved with mutation D that reverting the Thai scan_interval description
+    entirely back to its pre-`docs-cleanup` wording left the full suite green
+    (190 passed), silently undoing a whole topic's worth of Thai-wording work.
+
+    AC-2(ข) — technical-term policy: `entry` (English) must survive, `รายการ`
+    (the ambiguous Thai word it replaced) must not come back. This is a
+    marker-word check like Q-1's `measured`/`วัดจริง` above, not a full-sentence
+    lock, per `plan-cleanup.md`'s own "ห้ามเขียนเทสต์ที่ล็อกทั้งประโยค" rule
+    (locking the whole sentence would go red on every future wording polish
+    that isn't actually a regression).
+
+    AC-2(ก) — `เวลาเลือกค่า` moved from trailing the sentence to leading its
+    final clause. Locking exact position (e.g. "must be the Nth word") would
+    be just as brittle as locking the whole sentence, so this only asserts
+    the one thing that must never be true again: the description must NOT
+    *end* with `เวลาเลือกค่า` (the trailing form the wording was fixed away
+    from). Any non-trailing placement — including a future rewording that
+    moves the phrase elsewhere in the middle — is fine and won't trip this.
+    """
+    description = _get_by_path(_load_th(), _SCAN_INTERVAL_DESC_PATH)
+
+    assert "entry" in description, (
+        f"th.json scan_interval description lost the English technical term "
+        f"'entry' (AC-2(ข), cleanup-review.md m-2) — got: {description!r}"
+    )
+    assert "รายการ" not in description, (
+        f"th.json scan_interval description brought back the ambiguous Thai "
+        f"word 'รายการ' that AC-2(ข) replaced with 'entry' — got: {description!r}"
+    )
+    assert not description.rstrip(" .").endswith("เวลาเลือกค่า"), (
+        f"th.json scan_interval description has 'เวลาเลือกค่า' trailing the "
+        f"sentence again — AC-2(ก) (cleanup-review.md m-2) moved it to lead "
+        f"the final clause instead — got: {description!r}"
+    )
 
 
 # --- Q-6: guard that the existing en-parity test stays en-only ----------------
