@@ -47,6 +47,8 @@ Don't have HACS (e.g. a minimal Home Assistant Container/Core setup)? You can in
 
 ## Configuration
 
+The setup and options screens, and all entity names, are available in **English and Thai** — Home Assistant picks the language automatically from your `hass.config.language` setting. **`entity_id`s stay English in every language, including Thai** — that's Home Assistant's own behavior for languages that don't use a Latin-based script, not a choice this integration has to make — see the note under "Entities" below for why.
+
 The config flow is a **single step**: enter a **device name** (used as the entry title and, at creation time, feeds the entity IDs generated for this device — you can rename the friendly name later, but the entity IDs themselves won't change), the gateway **host/IP**, the **port** (defaults to `502`, the Modbus TCP standard, but that's not always correct — check your gateway's own configuration page, since an Elfin EW11 commonly defaults to `8899` instead), and an optional **unit-id**.
 
 What happens next depends on whether you filled in unit-id:
@@ -59,20 +61,57 @@ What happens next depends on whether you filled in unit-id:
 
 ### Options
 
-- **Poll interval** — default 30s, minimum **1s** (entering a lower value is rejected with an explicit error, not silently clamped). Before lowering it, do the bus math — these numbers are **measured** (from real DEBUG-log timing on the reference hardware, 2026-08-05), not estimated: a single register-block read takes **~115ms** including turnaround at `9600 8N2`. By default this integration reads **2 blocks per poll** (the basic block, plus the indoor telemetry block for the room-temperature reading above — see below), so at a 1s interval one AC unit uses about **~23%** of the bus's time; with advanced telemetry sensors also enabled (3 blocks total per poll — basic + indoor + outdoor) that rises to roughly **~35%**. If you have **multiple AB64 boxes sharing the same RS-485 line**, their poll traffic all shares that same bus — at the default 2-block read, the bus is effectively saturated with only around **4 units** all polling at 1s. Lower the interval gradually and watch for read failures rather than jumping straight to 1s on a shared bus, especially if more than one AB64 shares the line.
+- **Poll interval** — default **5s**, minimum **1s** (entering a lower value is rejected with an explicit error, not silently clamped). These numbers are **measured** (from real DEBUG-log timing on the reference hardware, 2026-08-05), not estimated: a single register-block read takes **~115ms** including turnaround at `9600 8N2`. By default this integration reads **2 blocks per poll** per unit (the basic block, plus the indoor telemetry block for the room-temperature reading above — see below); with advanced telemetry sensors enabled that's **3 blocks per poll** (+ the outdoor block).
+
+  If you have **multiple AB64 boxes sharing the same RS-485 line**, their poll traffic all shares that same bus. Here's the percentage of bus time consumed (`units × blocks × 115ms ÷ interval`) at a few interval/unit-count combinations — a full breakdown of every interval isn't practical here, so treat these as anchor points and interpolate:
+
+  **% of bus time — default (2 blocks/poll)**
+
+  | Units | 1s | 5s | 30s |
+  |---:|---:|---:|---:|
+  | 1 | 23.0% | 4.6% | 0.8% |
+  | 2 | 46.0% | 9.2% | 1.5% |
+  | 4 | 92.0% | 18.4% | 3.1% |
+  | 8 | 184% ❌ | 36.8% | 6.1% |
+
+  **% of bus time — with advanced telemetry enabled (3 blocks/poll)**
+
+  | Units | 1s | 5s | 30s |
+  |---:|---:|---:|---:|
+  | 1 | 34.5% | 6.9% | 1.2% |
+  | 2 | 69.0% | 13.8% | 2.3% |
+  | 4 | 138% ❌ | 27.6% | 4.6% |
+  | 8 | 276% ❌ | 55.2% | 9.2% |
+
+  (❌ marks combinations where a full poll round would take *longer than the interval itself* — reads queue up and start failing; don't run there.)
+
+  **Recommended minimum interval by unit count** (default 2-block reads):
+
+  | Units | Saturated (100%) | Recommended (≤50%) | Comfortable (≤25%) |
+  |---:|---:|---:|---:|
+  | 1 | 0.23s | 1s | 1s |
+  | 2 | 0.46s | 1s | 2s |
+  | 4 | 0.92s | 2s | 4s |
+  | 8 | 1.84s | 4s | 8s |
+
+  Aim for the "Recommended" column or better, not the saturated figure. **115ms is the normal-case timing, not a worst case** — retries, dropped frames, or the AB64 responding slower than usual will eat into whatever headroom is left, so keeping at least half the bus idle gives that room to absorb without visible read failures.
+
+  **A longer poll interval does not make commands issued from Home Assistant slower.** After you issue a command from the climate card, you still see the read-back value in about **~2 seconds**, the same as at any other interval — that comes from the post-write refresh (see "Entity availability, and why values aren't instant" below), which fires on its own schedule regardless of the poll interval. What the poll interval actually controls is how quickly Home Assistant notices changes that **didn't come from HA** — someone using the AC's remote or wall control panel, the room temperature drifting, or an error code changing. This distinction is easy to miss, so it's worth being explicit: raising the interval trades off how fast you see *those* changes, not how fast your own commands take effect.
 - **Enable advanced telemetry sensors** — **off by default**. This option controls **entity creation, not register reads** — those are two different things: the indoor telemetry block (which includes the room-temperature register used by the climate card above) is **always read**, whether or not this option is on. **As of 0.1.7, the room temperature reading (register 4012, TA) is also created as its own `sensor.<name>_indoor_temperature_ta` entity unconditionally** — it's the one exception to this option gating entity creation. Reasoning: every AC needs a return-air thermistor to run its own control loop, so TA is the one register in this group confident to exist on every model/firmware (unlike the other 11, which stay opt-in because that isn't known yet); and since it's already read every poll anyway to feed `climate.current_temperature`, creating a standalone entity for it costs **zero extra bus time**. That means the same reading is available in **two places** — the `current_temperature` attribute on the `climate` entity, and this standalone sensor — use whichever fits: the sensor is the one to reach for if you want the reading on a history graph, a dashboard card, or in long-term statistics, since a climate entity's attributes don't get their own history the way a sensor entity does. Turning this option on additionally **creates the other 11 sensor entities** (indoor/outdoor coil, discharge, suction temperatures, fan/compressor telemetry, filter timer) fed from that same indoor block plus a second, outdoor telemetry block. Leaving it off means zero extra entities beyond the always-on room-temperature sensor above — not "entities that read zero," no entities at all.
 
   **If a register doesn't exist on your model**, the AB64 can respond in one of three ways: a Modbus exception, or the sentinel value `0xFFFF` (both of these are shown automatically as `unavailable` — see "Entity availability" below) — **or a plain `0`, which looks exactly like a real reading and can't be told apart from one automatically.** If any advanced sensor is stuck at `0` and never moves no matter how hard the AC is working, suspect that your model or firmware simply doesn't have that register, rather than trusting it as a real value. (Some models/firmware may be missing specific registers — see "Confirmation status of advanced telemetry values" below.)
 
 ### Multiple AC units on one gateway
 
-Add the integration again — **one indoor unit per config entry**. If a second entry points at the same host:port as an existing one, it automatically **shares the underlying Modbus connection** with it; you don't need to configure anything for this. This is the vendor's normal topology (multiple AB64 boxes sharing one RS-485 bus), not an edge case. The unit-id address space is **1–64** (see the DIP-switch formula above), but that's just how many addresses exist — it's not a recommendation for how many boxes to actually put on one bus. For that, the number that actually matters is the poll-bandwidth math under **Poll interval** above: a shared bus gets saturated around **4 units** at a 1s poll interval. Use that to plan how many AB64 boxes make sense on one RS-485 line, not the address-space count.
+Add the integration again — **one indoor unit per config entry**. If a second entry points at the same host:port as an existing one, it automatically **shares the underlying Modbus connection** with it; you don't need to configure anything for this. This is the vendor's normal topology (multiple AB64 boxes sharing one RS-485 bus), not an edge case. The unit-id address space is **1–64** (see the DIP-switch formula above), but that's just how many addresses exist — it's not a recommendation for how many boxes to actually put on one bus. For that, the number that actually matters is the poll-bandwidth math under **Poll interval** above — see the bus-time and recommended-minimum-interval tables there for how many boxes make sense at a given poll interval. Use those, not the address-space count, to plan how many AB64 boxes make sense on one RS-485 line.
 
 ### Reconfigure
 
 To change IP, port, or unit-id after setup, use the integration's **Reconfigure** button — don't remove and re-add it. The new values are re-verified with a real register read before being saved, and are checked against every other config entry to avoid two entries ending up on the same host:port:unit-id.
 
 ## Entities
+
+**Entity names (the labels shown on cards) are translated along with the rest of the UI** — on a Thai-language Home Assistant instance, the sensor names in the table below appear in Thai. **`entity_id`s (the machine identifiers, e.g. `sensor.<name>_indoor_temperature_ta`) stay English regardless, and that's not something this integration opts into or has to maintain** — Home Assistant itself falls back to English when generating `entity_id`s for any language that doesn't use a Latin-based script (Thai included, the same as Japanese, Chinese, Korean, or Russian), independently of what the entity's display name is translated to. So the `entity_id`s in the table below, and on your own installation, stay identical no matter what language Home Assistant is set to — dashboards and automations shared between users on different languages keep working normally.
 
 | Entity | Notes |
 |---|---|
@@ -94,9 +133,9 @@ To change IP, port, or unit-id after setup, use the integration's **Reconfigure*
 
 **There is no optimistic state.** Every value shown by this integration is a value actually read back from the hardware — never the value you just commanded. After changing mode, fan speed, or setpoint from the climate card, there's a real hardware delay before the new value can be read back at all: **measured at ~1.3–1.4s** on the reference hardware (2026-08-05, poll interval 1s) — three back-to-back writes (setpoint 23→22, mode cool→fan_only, mode fan_only→cool) came back at 1.71s, 1.76s, and 1.65s respectively, consistently across all three, of which about 0.36s was round-trip overhead of the measurement tool itself rather than AB64/AC latency. (Previously this section said "~10s observed" — that was an imprecise guess, not a measurement; this replaces it.)
 
-In practice, the delay you actually see on the card is that **~1–2s hardware delay, plus up to one more poll interval** — the coordinator's read immediately after the write happens before the AB64 has caught up, so it still gets the old value; the new value only shows up on the next scheduled poll. At the 30s default that wait dominates and makes the update feel much slower than the hardware actually is, even though the AB64 is ready again by around the 1-second mark.
+In practice, the delay you actually see on the card is that **~1–2s hardware delay, plus up to one more poll interval** — the coordinator's read immediately after the write happens before the AB64 has caught up, so it still gets the old value; the new value only shows up on the next scheduled poll. At the 5s default that wait can still dominate and make the update feel slower than the hardware actually is, even though the AB64 is ready again by around the 1-second mark — and it gets worse the further you raise the interval.
 
-**To close that gap without introducing optimistic state**, the coordinator schedules one extra read about **2 seconds** after every write, in addition to the immediate one — so on the 30s default you see the real, read-back value in about 2 seconds instead of waiting up to 30. This is still not optimistic state: what you see at that ~2s mark is a genuine register read, not the value you commanded — if the AC hadn't actually applied it yet for some reason, the card would show that instead. If your **Poll interval** is already **2 seconds or less**, this extra read doesn't happen — normal polling already covers it at that cadence, so there's nothing extra to add. If you're issuing several changes in a row and don't want to wait even the ~2s for each, lower the **Poll interval** option (see above) rather than expecting the card to update instantly.
+**To close that gap without introducing optimistic state**, the coordinator schedules one extra read about **2 seconds** after every write, in addition to the immediate one — so at the 5s default you see the real, read-back value in about 2 seconds instead of waiting up to 5 — and the gap it closes grows if you raise the interval. This is still not optimistic state: what you see at that ~2s mark is a genuine register read, not the value you commanded — if the AC hadn't actually applied it yet for some reason, the card would show that instead. If your **Poll interval** is already **2 seconds or less**, this extra read doesn't happen — normal polling already covers it at that cadence, so there's nothing extra to add. If you're issuing several changes in a row and don't want to wait even the ~2s for each, lower the **Poll interval** option (see above) rather than expecting the card to update instantly.
 
 ## Confirmation status of advanced telemetry values
 
@@ -137,7 +176,7 @@ If you have a different AC model and want to help confirm (or correct) the assum
 
 - **v1 scope: one indoor unit per config entry.** No VRF group control — add a separate entry per indoor unit.
 - **Only Modbus function code 03 (Holding Registers) is used.** This device does not answer FC04 (Input Registers), even for read-only fields. This is an **empirical finding from live bring-up testing, not something documented in the vendor manual** — the manual never mentions Modbus function codes at all.
-- **English only** — no other translations are provided.
+- **Setup/options UI and entity names available in English and Thai.** `entity_id`s stay English in every language regardless — that's Home Assistant's own behavior for non-Latin-script languages, not something this integration opts into — see the note under "Entities" above.
 - **Not everything about advanced telemetry is vendor-confirmed** — see "Confirmation status of advanced telemetry values" above for exactly which claims are verified and which are still inferred.
 - **A register value of `0xFFFF` (65535) on any advanced telemetry field is treated as "no value"** and the corresponding sensor goes `unavailable`, rather than being shown as a number — this is the same sentinel convention the device uses for register 11 (see the `ab_bus_link` binary_sensor above). A plain `0` is a separate, harder case — see the warning under "Enable advanced telemetry sensors" above.
 - Advanced telemetry registers may not exist on every model/firmware — registers are read one block at a time, so if a block isn't supported, the sensors in that register block go `unavailable` together rather than affecting the rest of the integration.

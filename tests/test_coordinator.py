@@ -24,6 +24,7 @@ from custom_components.carr_ab64.const import (
     CONF_ENABLE_ADVANCED,
     CONF_SCAN_INTERVAL,
     CONF_UNIT_ID,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MAX_CONSECUTIVE_READ_FAILURES,
     POST_WRITE_REFRESH_DELAY,
@@ -1150,6 +1151,38 @@ async def test_no_follow_up_scheduled_when_scan_interval_leq_delay(
     assert coordinator._post_write_refresh_unsub is None, (
         f"no follow-up should be scheduled when scan_interval={scan_interval} "
         f"<= POST_WRITE_REFRESH_DELAY"
+    )
+
+
+def test_default_scan_interval_stays_above_post_write_refresh_delay():
+    """qa-poll5s.md guard (v0.1.8, DEFAULT_SCAN_INTERVAL 30 -> 5) — the single
+    most important test of this topic. This checks the two constants against
+    each other directly rather than any entry/coordinator behavior, because a
+    regression here is otherwise silent by design:
+    _async_schedule_post_write_refresh() (coordinator.py) no-ops whenever
+    self.update_interval.total_seconds() <= POST_WRITE_REFRESH_DELAY, with no
+    exception and no log line — that's correct behavior for an entry whose
+    scan_interval a user explicitly set that low (see
+    test_no_follow_up_scheduled_when_scan_interval_leq_delay above), but if
+    DEFAULT_SCAN_INTERVAL itself ever drops to <= POST_WRITE_REFRESH_DELAY,
+    every entry relying on the default silently loses the entire 0.1.7
+    follow-up-read feature. That regression isn't necessarily invisible to the
+    rest of the suite — this task's own mutation testing (see
+    done/qa-poll5s.md) found DEFAULT_SCAN_INTERVAL=2 also turns some
+    behavioral tests red, e.g. test_pending_follow_up_cancelled_on_unload_no_error,
+    whose own "sanity: a follow-up really is pending" precondition breaks
+    first. But those are accidental side effects that take tracing a failed
+    precondition back to its root cause to diagnose, not a test actually
+    asserting the relationship between these two constants. This is the only
+    test in the suite that fails for that reason on purpose, with the cause
+    legible straight from the assert message — which is exactly why it still
+    earns its place alongside those indirect failures rather than relying on
+    them."""
+    assert DEFAULT_SCAN_INTERVAL > POST_WRITE_REFRESH_DELAY, (
+        f"DEFAULT_SCAN_INTERVAL ({DEFAULT_SCAN_INTERVAL}) must stay strictly "
+        f"greater than POST_WRITE_REFRESH_DELAY ({POST_WRITE_REFRESH_DELAY}), or "
+        "the post-write follow-up refresh added in 0.1.7 silently stops firing "
+        "for every entry using the default scan interval"
     )
 
 

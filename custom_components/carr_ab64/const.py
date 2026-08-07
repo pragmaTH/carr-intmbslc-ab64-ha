@@ -120,7 +120,16 @@ AB_BUS_FAULT_DEBOUNCE_SECONDS = 20
 # risk this was meant to avoid (e.g. an Elfin EW11 actually defaulting to 8899) is now
 # covered by a warning in the port field's data_description instead of an empty field.
 DEFAULT_PORT = 502
-DEFAULT_SCAN_INTERVAL = 30
+# 5s default (2026-08-05, was 30s): measured 115 ms per register-block read, 2
+# blocks/poll by default (basic block + the indoor advanced block, which is now
+# always read for current_temperature) — 4 AB64 units sharing one gateway at 5s each
+# comes to 18.4% of the RS-485 bus's time (27.6% with advanced telemetry on for all
+# 4), comfortably under saturation. 30s made changes made from a remote/panel (not
+# issued through HA) take up to 30s to show up on the card, slower than the bus math
+# actually requires. Must stay greater than POST_WRITE_REFRESH_DELAY below — if it
+# ever drops to <= that value, _async_schedule_post_write_refresh() returns
+# immediately every time and the 0.1.7 follow-up-read feature goes silently dead.
+DEFAULT_SCAN_INTERVAL = 5
 # Lowered from 10 (2026-08-05): after a climate command, users want the card to
 # reflect a value actually read back rather than an optimistic one we just wrote —
 # the fix is to poll faster, not to fake the state. 1s is only safe together with
@@ -166,7 +175,7 @@ UNSUPPORTED_BLOCK_RETRY_LADDER = (60, 300, 600)
 # immediate async_refresh() right after a write (see AB64Coordinator.async_write)
 # always reads back the pre-write value. Without a follow-up, the next read that
 # could show the settled value is whatever the regular poll interval leaves the user
-# waiting for — up to the full DEFAULT_SCAN_INTERVAL (30s) even though the hardware
+# waiting for — up to the full DEFAULT_SCAN_INTERVAL (5s) even though the hardware
 # was ready after about 1 second. This schedules exactly one extra read this far
 # after a write, once, to close that gap — see async_write for why it's still a real
 # read and not optimistic state.

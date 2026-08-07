@@ -1,6 +1,8 @@
 """Options flow tests: poll interval + advanced telemetry opt-in."""
 from __future__ import annotations
 
+from datetime import timedelta
+
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -38,12 +40,16 @@ async def _setup_entry(hass, fake_clients, **kwargs) -> MockConfigEntry:
     return entry
 
 
-async def test_default_scan_interval_is_30(hass, fake_clients):
-    """Case 21."""
+async def test_default_scan_interval(hass, fake_clients):
+    """Case 21 (renamed for v0.1.8, was test_default_scan_interval_is_30): the
+    literal 5 here is intentional, not just a mirror of DEFAULT_SCAN_INTERVAL —
+    it pins the bus-math-chosen value from plan-poll5s.md so a future accidental
+    edit to the constant (e.g. reverting to 30) fails this test even though the
+    schema-vs-constant equality alone wouldn't catch that."""
     entry = await _setup_entry(hass, fake_clients)
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] == FlowResultType.FORM
-    assert result["data_schema"]({})[CONF_SCAN_INTERVAL] == DEFAULT_SCAN_INTERVAL == 30
+    assert result["data_schema"]({})[CONF_SCAN_INTERVAL] == DEFAULT_SCAN_INTERVAL == 5
 
 
 async def test_scan_interval_below_minimum_is_validation_error_not_clamped(hass, fake_clients):
@@ -118,11 +124,14 @@ async def test_enabling_advanced_telemetry_and_reload_creates_all_entities(hass,
 
 
 async def test_scan_interval_change_updates_coordinator_update_interval(hass, fake_clients):
-    """Case 24."""
-    from datetime import timedelta
-
+    """Case 24. The pre-change baseline asserts against DEFAULT_SCAN_INTERVAL
+    (not a hardcoded 30, per qa-poll5s.md's line-125 flag) — this entry is set
+    up with empty options via _setup_entry(), so its starting update_interval
+    IS whatever the default currently is; hardcoding 30 here would have made
+    this test silently rely on the pre-0.1.8 default instead of testing what it
+    says it tests (that changing the option updates the coordinator)."""
     entry = await _setup_entry(hass, fake_clients)
-    assert entry.runtime_data.update_interval == timedelta(seconds=30)
+    assert entry.runtime_data.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     await hass.config_entries.options.async_configure(
@@ -132,3 +141,25 @@ async def test_scan_interval_change_updates_coordinator_update_interval(hass, fa
 
     reloaded_entry = hass.config_entries.async_get_entry(entry.entry_id)
     assert reloaded_entry.runtime_data.update_interval == timedelta(seconds=60)
+
+
+async def test_existing_scan_interval_option_survives_default_change(hass, fake_clients):
+    """v0.1.8 guard (plan-poll5s.md Acceptance Criteria #3): DEFAULT_SCAN_INTERVAL
+    moved 30 -> 5, but an entry that already has an explicit scan_interval saved
+    in its options (e.g. a pre-0.1.8 user who never touched the option, so it
+    was persisted as 30 by an earlier options-flow save, or anyone who chose 30
+    on purpose) must keep exactly that value after the upgrade — there must be
+    no migration that rewrites existing options to the new default."""
+    entry = await _setup_entry(hass, fake_clients, options={CONF_SCAN_INTERVAL: 30})
+    assert entry.runtime_data.update_interval == timedelta(seconds=30)
+
+
+async def test_empty_options_entry_gets_new_default_scan_interval(hass, fake_clients):
+    """v0.1.8 guard, counterpart to the migration test above: an entry with NO
+    scan_interval in options (fresh install, or one that's never opened the
+    options flow) is the case that's SUPPOSED to change — it must pick up the
+    new DEFAULT_SCAN_INTERVAL (5s), confirming the "no migration" guard above
+    isn't just masking a coordinator that ignores the new default entirely."""
+    entry = await _setup_entry(hass, fake_clients, options={})
+    assert entry.runtime_data.update_interval == timedelta(seconds=DEFAULT_SCAN_INTERVAL)
+    assert entry.runtime_data.update_interval == timedelta(seconds=5)

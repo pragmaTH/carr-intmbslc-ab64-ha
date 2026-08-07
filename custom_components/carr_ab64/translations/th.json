@@ -1,0 +1,89 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "เพิ่มเครื่องปรับอากาศ",
+        "description": "ตั้งค่าเครื่องปรับอากาศ (indoor unit) หนึ่งเครื่องที่เชื่อมต่อผ่านกล่อง AB64 และ gateway แบบ Modbus TCP↔RTU (เช่น Elfin EW11) ตั้งชื่อตามเครื่องปรับอากาศหรือห้องที่ติดตั้ง ไม่ใช่ตาม gateway (ดูรายละเอียดด้านล่าง) — host และ port คือการเชื่อมต่อ TCP ของตัว gateway เอง ส่วน unit-id ด้านล่างคือที่อยู่ของกล่อง AB64 เองบน gateway นั้น",
+        "data": {
+          "name": "ชื่อเครื่องปรับอากาศ",
+          "host": "Host / IP address ของ gateway",
+          "port": "TCP port ของ gateway",
+          "unit_id": "unit-id ของ AB64"
+        },
+        "data_description": {
+          "name": "ชื่อนี้จะถูกใช้กำหนด entity ID ของเครื่องปรับอากาศนี้ตอนสร้าง entity ครั้งแรก — ตั้งชื่อตามเครื่องปรับอากาศหรือห้อง ไม่ใช่ตาม gateway",
+          "port": "TCP port ที่ gateway ของคุณเปิดรอรับ Modbus — 502 คือค่ามาตรฐานของ Modbus แต่ให้ตรวจสอบหน้าตั้งค่าของ gateway เองด้วย (Elfin EW11 ค่าเริ่มต้นคือ 8899)",
+          "unit_id": "ที่อยู่ของกล่อง AB64 เองบน gateway — unit-id = SW2 × 16 + SW1 + 1 (ตาราง DIP switch ของผู้ผลิตเริ่มนับที่ 1 ดังนั้นสวิตช์ที่ 0,0 หมายถึง 1 ไม่ใช่ 0) เว้นว่างไว้เพื่อสแกนช่วง 1-64 แทน ซึ่งอาจใช้เวลาถึงประมาณหนึ่งนาที"
+        }
+      },
+      "select_unit": {
+        "title": "ยืนยัน unit-id ของ AB64",
+        "description": "มี unit-id หนึ่งตัวขึ้นไปตอบกลับบน gateway นี้ ถ้าไม่แน่ใจว่าตัวไหนคือเครื่องปรับอากาศเครื่องนี้ ให้ลองสั่งเปิด/ปิด (หรือเปลี่ยนโหมด) ด้วยรีโมท แล้วดูว่ารายการไหนมีสถานะเปลี่ยนตาม — ค่าที่แสดงเป็นค่าที่อ่านสดขณะนั้น ไม่ใช่ค่าที่ cache ไว้",
+        "data": {
+          "unit_id": "หมายเลข Unit-id"
+        }
+      },
+      "reconfigure": {
+        "title": "ตั้งค่าการเชื่อมต่อ AB64 ใหม่",
+        "description": "เปลี่ยน host/TCP port ของ gateway หรือ unit-id ของกล่อง AB64 สำหรับเครื่องปรับอากาศนี้ ค่าใหม่จะถูกตรวจสอบอีกครั้งด้วยการอ่าน register 0 ก่อนบันทึก",
+        "data": {
+          "host": "Host / IP address ของ gateway",
+          "port": "TCP port ของ gateway",
+          "unit_id": "unit-id ของ AB64 / ที่อยู่จาก DIP switch"
+        },
+        "data_description": {
+          "port": "TCP port ที่ gateway ของคุณเปิดรอรับ Modbus — 502 คือค่ามาตรฐานของ Modbus แต่ให้ตรวจสอบหน้าตั้งค่าของ gateway เองด้วย (Elfin EW11 ค่าเริ่มต้นคือ 8899)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "เปิดการเชื่อมต่อ TCP ไปยัง gateway ไม่ได้ ตรวจสอบ host, port และว่า gateway เชื่อมต่อกับเครือข่ายได้จริง",
+      "read_timeout": "เชื่อมต่อกับ gateway ได้แล้ว แต่ AB64 ไม่ตอบกลับที่ unit-id นี้ ตรวจสอบการเดินสาย, baud rate และที่อยู่ DIP switch",
+      "no_units_found": "ไม่มี unit-id ในช่วง 1-64 ตอบกลับเลย ตรวจสอบการเดินสาย, baud rate และว่า gateway เชื่อมต่อกับบัส RS-485 อยู่จริง",
+      "all_units_already_configured": "ทุก unit-id ที่ตอบกลับบน gateway นี้ถูกตั้งค่าเป็นรายการอื่นไปแล้ว ไม่มีอะไรใหม่ให้เพิ่มตรงนี้",
+      "already_configured": "host, port และ unit-id ชุดนี้ถูกตั้งค่าไว้แล้ว"
+    },
+    "abort": {
+      "already_configured": "host, port และ unit-id ชุดนี้ถูกตั้งค่าไว้แล้ว",
+      "reconfigure_successful": "อัปเดตการเชื่อมต่อ AB64 เรียบร้อยแล้ว"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ตัวเลือกของ AB64",
+        "data": {
+          "scan_interval": "ช่วงเวลาโพล (วินาที)",
+          "enable_advanced_telemetry": "เปิดใช้งาน sensor ข้อมูล telemetry ขั้นสูง"
+        },
+        "data_description": {
+          "scan_interval": "การอ่านหนึ่งครั้งใช้เวลาประมาณ 115 ms (จากที่วัดจริง ไม่ใช่ค่าจากผู้ผลิต) และ integration นี้อ่าน register block 2 บล็อกต่อการโพลหนึ่งครั้งตามค่าเริ่มต้น (3 บล็อกถ้าเปิด advanced telemetry) ค่าเริ่มต้น 5 วินาที (ต่ำสุด 1 วินาที) ใช้บัส RS-485 ประมาณ 4.6% ต่อเครื่องหนึ่งเครื่อง — 9.2% สำหรับ 2 เครื่อง, 18.4% สำหรับ 4 เครื่อง (6.9/13.8/27.6% ถ้าเปิด advanced telemetry) นับ AB64 ทุกตัวที่แชร์ gateway เดียวกันนี้ ไม่ใช่แค่รายการนี้รายการเดียว เวลาเลือกค่า",
+          "enable_advanced_telemetry": "เปิด sensor เพิ่มเติมประมาณ 11 ตัวสำหรับข้อมูล telemetry อื่น ๆ ของ indoor/outdoor (อุณหภูมิ coil/outdoor, กระแส/ความเร็วคอมเพรสเซอร์, ความเร็วพัดลม) — อุณหภูมิอากาศภายในรวมอยู่แล้วโดยค่าเริ่มต้น register บางตัวในกลุ่มนี้ไม่มีในเครื่องปรับอากาศหรือ firmware บางรุ่น — sensor เหล่านั้นจะกลายเป็น unavailable ไปเอง แต่ถ้า sensor ตัวใดกลับแสดงค่าค้างที่ 0 ไม่ขยับเลยแม้ตอนเครื่องทำงานหนัก ให้สงสัยว่า register นั้นไม่รองรับบนเครื่องนี้ อย่าเชื่อว่าเป็นค่าจริง"
+        }
+      }
+    },
+    "error": {
+      "scan_interval_too_low": "ช่วงเวลาโพลต้องอย่างน้อย 1 วินาที — บัสนี้อาจถูกแชร์กับ AB64 ตัวอื่นบน gateway เดียวกัน"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "error_code": { "name": "รหัสข้อผิดพลาด" },
+      "indoor_temp": { "name": "อุณหภูมิภายใน (TA)" },
+      "indoor_coil_temp_tcj": { "name": "อุณหภูมิคอยล์ภายใน (TCJ)" },
+      "indoor_coil_temp_tc2": { "name": "อุณหภูมิคอยล์ภายใน (TC2)" },
+      "indoor_fan_rpm": { "name": "ความเร็วพัดลมภายใน" },
+      "filter_sign_timer": { "name": "ตัวจับเวลาแจ้งเตือนไส้กรอง" },
+      "outdoor_evaporator_temp_te": { "name": "อุณหภูมิคอยล์ระเหยภายนอก (TE)" },
+      "outdoor_temp_to": { "name": "อุณหภูมิภายนอก (TO)" },
+      "outdoor_discharge_temp_td": { "name": "อุณหภูมิท่อส่งภายนอก (TD)" },
+      "outdoor_suction_temp_ts": { "name": "อุณหภูมิท่อดูดภายนอก (TS)" },
+      "compressor_current": { "name": "กระแสคอมเพรสเซอร์" },
+      "compressor_rpm": { "name": "ความเร็วคอมเพรสเซอร์" },
+      "lowest_fan_rpm": { "name": "ความเร็วพัดลมภายนอกต่ำสุด" }
+    },
+    "binary_sensor": {
+      "ab_bus_link": { "name": "การเชื่อมต่อ AB Bus" }
+    }
+  }
+}
